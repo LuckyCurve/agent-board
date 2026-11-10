@@ -1,5 +1,7 @@
 # Agent Board
 
+[![ci](https://github.com/LuckyCurve/agent-board/actions/workflows/ci.yml/badge.svg)](https://github.com/LuckyCurve/agent-board/actions/workflows/ci.yml)
+
 本机任务看板：Agent 写卡片和进展，用户在看板上回话、拍板，主会话收事件派活。
 
 单个 Go 二进制 + 一个 SQLite 文件，默认只绑 `127.0.0.1:8765`。
