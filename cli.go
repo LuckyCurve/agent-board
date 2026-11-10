@@ -1,0 +1,593 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+)
+
+type client struct {
+	base  string
+	token string
+}
+
+func newClient(tokenFlag string) (*client, error) {
+	base := envOr("BOARD_URL", "http://127.0.0.1:8765")
+	base = strings.TrimRight(base, "/")
+	tok := tokenFlag
+	if tok == "" {
+		tok = os.Getenv("BOARD_TOKEN")
+	}
+	if tok == "" {
+		if p, err := resolvePaths("", ""); err == nil {
+			if b, err := os.ReadFile(p.token); err == nil {
+				tok = strings.TrimSpace(string(b))
+			}
+		}
+	}
+	if tok == "" {
+		return nil, fmt.Errorf("no token: set BOARD_TOKEN, or run `agent-board serve` once to create ~/.agent-board/token")
+	}
+	return &client{base: base, token: tok}, nil
+}
+
+func (c *client) raw(method, path string, body any, timeout time.Duration) (int, []byte, error) {
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		r = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, c.base+path, r)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	cl := &http.Client{Timeout: timeout}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, err
+}
+
+func (c *client) do(method, path string, body, out any) error {
+	code, b, err := c.raw(method, path, body, 15*time.Second)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(b, &e) == nil && e.Error != "" {
+			return fmt.Errorf("%s", e.Error)
+		}
+		return fmt.Errorf("http %d: %s", code, strings.TrimSpace(string(b)))
+	}
+	if out != nil {
+		return json.Unmarshal(b, out)
+	}
+	return nil
+}
+
+func mustClient(tokenFlag string) *client {
+	c, err := newClient(tokenFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return c
+}
+
+func cmdTask(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: agent-board task new|list|show ...")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "new":
+		fs := flag.NewFlagSet("task new", flag.ExitOnError)
+		title := fs.String("title", "", "task title")
+		project := fs.String("project", "", "project name")
+		agent := fs.String("agent", "", "owning agent")
+		column := fs.String("column", "todo", "todo|doing|blocked|done")
+		key := fs.String("key", "", "idempotency key")
+		token := fs.String("token", "", "bearer token")
+		fs.Parse(args[1:])
+		if *title == "" {
+			fmt.Fprintln(os.Stderr, "--title required")
+			os.Exit(2)
+		}
+		var resp struct {
+			Task Task `json:"task"`
+		}
+		err := mustClient(*token).do("POST", "/api/tasks", map[string]string{
+			"title": *title, "project": *project, "agent": *agent,
+			"column": *column, "key": *key,
+		}, &resp)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(resp.Task.ID)
+
+	case "list":
+		fs := flag.NewFlagSet("task list", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "print raw json")
+		token := fs.String("token", "", "bearer token")
+		fs.Parse(args[1:])
+		code, b, err := mustClient(*token).raw("GET", "/api/tasks", nil, 15*time.Second)
+		if err != nil {
+			fail(err)
+		}
+		if code >= 400 {
+			fail(fmt.Errorf("http %d: %s", code, strings.TrimSpace(string(b))))
+		}
+		if *asJSON {
+			fmt.Println(string(b))
+			return
+		}
+		var resp struct {
+			Tasks []Task `json:"tasks"`
+		}
+		if err := json.Unmarshal(b, &resp); err != nil {
+			fail(err)
+		}
+		if len(resp.Tasks) == 0 {
+			fmt.Println("(no tasks)")
+			return
+		}
+		for _, t := range resp.Tasks {
+			extra := ""
+			if t.Project != "" {
+				extra += " · " + t.Project
+			}
+			if t.Agent != "" {
+				extra += " · " + t.Agent
+			}
+			if t.Pending > 0 {
+				extra += fmt.Sprintf(" · 待拍板 %d", t.Pending)
+			}
+			last := ""
+			if t.LastEvent != nil && t.LastEvent.Body != "" {
+				last = "  " + oneLine(t.LastEvent.Body, 60)
+			}
+			fmt.Printf("%-5s %-8s %s%s%s\n", t.ID, t.Column, t.Title, extra, last)
+		}
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: agent-board task show T-1")
+			os.Exit(2)
+		}
+		var resp struct {
+			Task   Task    `json:"task"`
+			Events []Event `json:"events"`
+		}
+		if err := mustClient("").do("GET", "/api/tasks/"+url.PathEscape(args[1]), nil, &resp); err != nil {
+			fail(err)
+		}
+		t := resp.Task
+		fmt.Printf("%s  [%s]  %s\n", t.ID, t.Column, t.Title)
+		if t.Project != "" || t.Agent != "" {
+			fmt.Printf("project=%s  agent=%s\n", t.Project, t.Agent)
+		}
+		fmt.Println()
+		for _, e := range resp.Events {
+			ts := shortTime(e.CreatedAt)
+			label := e.Kind
+			if label == "" {
+				label = e.Type
+			}
+			fmt.Printf("%s  %-10s %s\n", ts, label, oneLine(e.Body, 120))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown task command %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func cmdMove(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agent-board move T-1 doing|blocked|done")
+		os.Exit(2)
+	}
+	var resp map[string]any
+	if err := mustClient("").do("PATCH", "/api/tasks/"+url.PathEscape(args[0]),
+		map[string]string{"column": args[1]}, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok %s -> %s\n", args[0], args[1])
+}
+
+func cmdEvent(args []string, defaultKind string) {
+	fs := flag.NewFlagSet("event", flag.ExitOnError)
+	task := fs.String("task", "", "task id")
+	kind := fs.String("kind", defaultKind, "progress|note|tool|artifact|conclusion|blocked|dispatch")
+	text := fs.String("text", "", "event text")
+	agent := fs.String("agent", "", "agent name")
+	session := fs.String("session", "", "session id")
+	data := fs.String("data", "", "extra json")
+	key := fs.String("key", "", "idempotency key")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *task == "" || (*text == "" && *data == "") {
+		fmt.Fprintln(os.Stderr, "usage: agent-board event --task T-1 --kind progress --text \"...\"")
+		os.Exit(2)
+	}
+	var resp struct {
+		Event Event `json:"event"`
+	}
+	err := mustClient(*token).do("POST", "/api/tasks/"+url.PathEscape(*task)+"/events", map[string]string{
+		"kind": *kind, "text": *text, "agent": *agent, "session": *session,
+		"data": *data, "key": *key,
+	}, &resp)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok seq=%d\n", resp.Event.Seq)
+}
+
+func cmdQuickEvent(args []string, kind string) {
+	if len(args) < 2 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintf(os.Stderr, "usage: agent-board %s T-1 \"一行内容\" [--agent X]\n", kind)
+		os.Exit(2)
+	}
+	task, text := args[0], args[1]
+	fs := flag.NewFlagSet(kind, flag.ExitOnError)
+	agent := fs.String("agent", "", "agent name")
+	session := fs.String("session", "", "session id")
+	key := fs.String("key", "", "idempotency key")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args[2:])
+	var resp struct {
+		Event Event `json:"event"`
+	}
+	err := mustClient(*token).do("POST", "/api/tasks/"+url.PathEscape(task)+"/events", map[string]string{
+		"kind": kind, "text": text, "agent": *agent, "session": *session, "key": *key,
+	}, &resp)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok seq=%d\n", resp.Event.Seq)
+}
+
+func cmdDone(args []string) {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "usage: agent-board done T-1 --text \"结论\"")
+		os.Exit(2)
+	}
+	task := args[0]
+	fs := flag.NewFlagSet("done", flag.ExitOnError)
+	text := fs.String("text", "", "conclusion")
+	agent := fs.String("agent", "", "agent name")
+	session := fs.String("session", "", "session id")
+	key := fs.String("key", "", "idempotency key")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args[1:])
+	if *text == "" {
+		fmt.Fprintln(os.Stderr, "--text required")
+		os.Exit(2)
+	}
+	c := mustClient(*token)
+	// 先移列再写结论：卡片上的「最新进展」才会是结论本身。
+	if err := c.do("PATCH", "/api/tasks/"+url.PathEscape(task),
+		map[string]string{"column": "done"}, nil); err != nil {
+		fail(err)
+	}
+	var resp struct {
+		Event Event `json:"event"`
+	}
+	if err := c.do("POST", "/api/tasks/"+url.PathEscape(task)+"/events", map[string]string{
+		"kind": "conclusion", "text": *text, "agent": *agent, "session": *session, "key": *key,
+	}, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok seq=%d -> done\n", resp.Event.Seq)
+}
+
+func cmdAsk(args []string) {
+	fs := flag.NewFlagSet("ask", flag.ExitOnError)
+	task := fs.String("task", "", "task id")
+	question := fs.String("question", "", "decision question")
+	options := fs.String("options", "同意,不同意", "comma separated options")
+	key := fs.String("key", "", "idempotency key")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *task == "" || *question == "" {
+		fmt.Fprintln(os.Stderr, "usage: agent-board ask --task T-1 --question \"...\" --options \"同意,重做\"")
+		os.Exit(2)
+	}
+	raw := strings.ReplaceAll(*options, "，", ",")
+	var opts []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			opts = append(opts, o)
+		}
+	}
+	var resp struct {
+		Decision Decision `json:"decision"`
+	}
+	err := mustClient(*token).do("POST", "/api/decisions", map[string]any{
+		"task_id": *task, "question": *question, "options": opts, "key": *key,
+	}, &resp)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Println(resp.Decision.ID)
+}
+
+func cmdDecisions(args []string) {
+	fs := flag.NewFlagSet("decisions", flag.ExitOnError)
+	status := fs.String("status", "pending", "pending|answered|all")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	q := ""
+	if *status != "all" && *status != "" {
+		q = "?status=" + url.QueryEscape(*status)
+	}
+	var resp struct {
+		Decisions []Decision `json:"decisions"`
+	}
+	if err := mustClient(*token).do("GET", "/api/decisions"+q, nil, &resp); err != nil {
+		fail(err)
+	}
+	if len(resp.Decisions) == 0 {
+		fmt.Println("(none)")
+		return
+	}
+	for _, d := range resp.Decisions {
+		fmt.Printf("%-4s %-5s %-6s %s  [%s]\n", d.ID, d.Status, d.TaskID, d.Question, d.Options)
+	}
+}
+
+func cmdWatch(args []string) {
+	fs := flag.NewFlagSet("watch", flag.ExitOnError)
+	consumer := fs.String("consumer", "main", "consumer name")
+	sinceFlag := fs.Int64("since", -1, "start seq (default: server acked_seq)")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	c := mustClient(*token)
+
+	since := *sinceFlag
+	if since < 0 {
+		var cur struct {
+			AckedSeq int64 `json:"acked_seq"`
+		}
+		if err := c.do("GET", "/api/consumer?name="+url.QueryEscape(*consumer), nil, &cur); err != nil {
+			fail(err)
+		}
+		since = cur.AckedSeq
+	}
+	fmt.Fprintf(os.Stderr, "watching from seq=%d as %s\n", since, *consumer)
+
+	for {
+		var resp struct {
+			Events []Event `json:"events"`
+			Next   int64   `json:"next"`
+		}
+		path := fmt.Sprintf("/api/events?since=%d&wait=50&consumer=%s", since, url.QueryEscape(*consumer))
+		code, b, err := c.raw("GET", path, nil, 70*time.Second)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "watch: %v\n", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if code >= 400 {
+			fmt.Fprintf(os.Stderr, "watch: http %d %s\n", code, strings.TrimSpace(string(b)))
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if err := json.Unmarshal(b, &resp); err != nil {
+			fmt.Fprintf(os.Stderr, "watch: %v\n", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		retry := false
+		for _, ev := range resp.Events {
+			ccode, cb, cerr := c.raw("POST", "/api/claim", map[string]any{
+				"consumer": *consumer, "seq": ev.Seq}, 10*time.Second)
+			if cerr != nil {
+				fmt.Fprintf(os.Stderr, "watch: claim %d: %v\n", ev.Seq, cerr)
+				retry = true
+				break
+			}
+			if ccode == http.StatusConflict {
+				_ = cb
+				since = ev.Seq
+				continue
+			}
+			// 主会话接手即亮「执行中」，用户不用等正文。
+			if ev.Kind == "user_reply" || ev.Kind == "user_reaction" || ev.Type == "decision.answered" {
+				_, _, _ = c.raw("PATCH", fmt.Sprintf("/api/replies/%d", ev.Seq),
+					map[string]string{"status": "processing", "agent": ev.Agent}, 10*time.Second)
+			}
+			printEventLine(ev)
+			since = ev.Seq
+		}
+		if retry {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if resp.Next > since && len(resp.Events) == 0 {
+			since = resp.Next
+		}
+		if len(resp.Events) == 0 {
+			continue
+		}
+	}
+}
+
+func printEventLine(ev Event) {
+	text := oneLine(ev.Body, 800)
+	switch {
+	case ev.Type == "decision.answered":
+		fmt.Printf("BOARD_DECISION_ANSWERED | seq=%d | task=%s | agent=%s | text=%s | data=%s\n",
+			ev.Seq, ev.TaskID, ev.Agent, text, ev.Data)
+	case ev.Kind == "user_reply" && ev.TaskID == "":
+		fmt.Printf("BOARD_USER_MESSAGE | seq=%d | text=%s | data=%s\n", ev.Seq, text, ev.Data)
+	case ev.Kind == "user_reply" || ev.Kind == "user_reaction":
+		fmt.Printf("BOARD_USER_REPLY | seq=%d | task=%s | agent=%s | text=%s | data=%s\n",
+			ev.Seq, ev.TaskID, ev.Agent, text, ev.Data)
+	case ev.Type == "decision.created":
+		fmt.Printf("BOARD_DECISION | seq=%d | task=%s | agent=%s | text=%s | data=%s\n",
+			ev.Seq, ev.TaskID, ev.Agent, text, ev.Data)
+	default:
+		fmt.Printf("BOARD_EVENT | seq=%d | type=%s | kind=%s | task=%s | agent=%s | text=%s\n",
+			ev.Seq, ev.Type, ev.Kind, ev.TaskID, ev.Agent, text)
+	}
+}
+
+func cmdTake(args []string) {
+	fs := flag.NewFlagSet("take", flag.ExitOnError)
+	seq := fs.Int64("seq", -1, "reply event seq")
+	agent := fs.String("agent", "", "agent now handling it")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *seq < 0 {
+		fmt.Fprintln(os.Stderr, "usage: agent-board take --seq N [--agent X]")
+		os.Exit(2)
+	}
+	var resp struct {
+		Reply Reply `json:"reply"`
+	}
+	if err := mustClient(*token).do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
+		map[string]string{"status": "processing", "agent": *agent}, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok reply=%d status=%s\n", resp.Reply.Seq, resp.Reply.Status)
+}
+
+func cmdFail(args []string) {
+	fs := flag.NewFlagSet("fail", flag.ExitOnError)
+	seq := fs.Int64("seq", -1, "reply event seq")
+	reason := fs.String("reason", "", "why it failed")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *seq < 0 {
+		fmt.Fprintln(os.Stderr, "usage: agent-board fail --seq N --reason \"...\"")
+		os.Exit(2)
+	}
+	var resp struct {
+		Reply Reply `json:"reply"`
+	}
+	if err := mustClient(*token).do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
+		map[string]string{"status": "failed", "note": *reason}, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok reply=%d status=failed\n", resp.Reply.Seq)
+}
+
+func cmdMessage(args []string) {
+	fs := flag.NewFlagSet("message", flag.ExitOnError)
+	text := fs.String("text", "", "free message to the main session")
+	key := fs.String("key", "", "idempotency key")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *text == "" {
+		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\"")
+		os.Exit(2)
+	}
+	var resp struct {
+		Event Event `json:"event"`
+	}
+	if err := mustClient(*token).do("POST", "/api/message",
+		map[string]string{"text": *text, "key": *key}, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok seq=%d\n", resp.Event.Seq)
+}
+
+func cmdReplies(args []string) {
+	fs := flag.NewFlagSet("replies", flag.ExitOnError)
+	recent := fs.Int("recent", 20, "how many")
+	free := fs.Bool("free", false, "only free messages")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	q := fmt.Sprintf("/api/replies?recent=%d", *recent)
+	if *free {
+		q += "&free=1"
+	}
+	var resp struct {
+		Replies []Reply `json:"replies"`
+	}
+	if err := mustClient(*token).do("GET", q, nil, &resp); err != nil {
+		fail(err)
+	}
+	for _, r := range resp.Replies {
+		fmt.Printf("%d\t%-10s\t%-6s\t%s\n", r.Seq, r.Status, r.TaskID, oneLine(r.Text, 80))
+	}
+}
+
+func cmdAck(args []string) {
+	fs := flag.NewFlagSet("ack", flag.ExitOnError)
+	seq := fs.Int64("seq", -1, "event seq")
+	consumer := fs.String("consumer", "main", "consumer name")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *seq < 0 {
+		fmt.Fprintln(os.Stderr, "usage: agent-board ack --seq N")
+		os.Exit(2)
+	}
+	if err := mustClient(*token).do("POST", "/api/ack", map[string]any{
+		"consumer": *consumer, "seq": *seq}, nil); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok acked seq=%d\n", *seq)
+}
+
+func cmdHealth(args []string) {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	base := strings.TrimRight(envOr("BOARD_URL", "http://127.0.0.1:8765"), "/")
+	req, _ := http.NewRequest("GET", base+"/api/health", nil)
+	if t := *token; t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		fail(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	fmt.Println(strings.TrimSpace(string(b)))
+}
+
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func shortTime(iso string) string {
+	t, err := time.Parse(time.RFC3339Nano, iso)
+	if err != nil {
+		return iso
+	}
+	return t.Local().Format("01-02 15:04")
+}
+
+func fail(err error) {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	os.Exit(1)
+}

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f9f9fb">
+<meta name="description" content="Agent 任务看板">
+<title>Agent Board</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="stylesheet" href="/radix.css">
+<link rel="stylesheet" href="/app.css">
+<script>
+(function () {
+  try {
+    var q = new URLSearchParams(location.search).get('theme');
+    var saved = q || localStorage.getItem('ab-theme');
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    if (q) localStorage.setItem('ab-theme', q);
+    if (dark) document.documentElement.classList.add('dark-theme');
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="2.5" y="3" width="5" height="18" rx="2" fill="currentColor"/>
+      <rect x="9.5" y="3" width="5" height="12" rx="2" fill="currentColor" opacity=".7"/>
+      <rect x="16.5" y="3" width="5" height="15" rx="2" fill="currentColor" opacity=".44"/>
+    </svg>
+    <span class="brand-name">Agent Board</span>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="视图">
+    <button class="tab" role="tab" data-view="board">看板</button>
+    <button class="tab" role="tab" data-view="inbox">收件箱</button>
+    <button class="tab" role="tab" data-view="calendar">日历</button>
+  </nav>
+
+  <div class="topbar-right">
+    <span class="live" id="live" title="实时更新"><span class="live-dot"></span><span class="live-text">实时</span></span>
+    <button class="icon-btn" id="themeToggle" aria-label="切换深浅色" title="切换深浅色"></button>
+  </div>
+</header>
+
+<main class="main">
+  <section class="view" id="view-board" role="tabpanel" aria-label="看板">
+    <div class="board" id="board"></div>
+  </section>
+
+  <section class="view" id="view-inbox" role="tabpanel" aria-label="收件箱" hidden>
+    <div class="page-head">
+      <div>
+        <h1>收件箱</h1>
+        <p class="page-sub">需要你拍板的事项</p>
+      </div>
+      <span class="count-pill" id="inboxCount">0</span>
+    </div>
+    <div class="inbox" id="inbox"></div>
+  </section>
+
+  <section class="view" id="view-calendar" role="tabpanel" aria-label="日历" hidden>
+    <div class="page-head">
+      <div>
+        <h1>活动日历</h1>
+        <p class="page-sub">最近 12 周的 Agent 事件</p>
+      </div>
+    </div>
+    <div class="calendar-card">
+      <div class="stats" id="stats"></div>
+      <div class="heatmap-wrap">
+        <div class="weekday-labels" aria-hidden="true"><span>一</span><span></span><span>三</span><span></span><span>五</span><span></span><span>日</span></div>
+        <div class="heatmap-col">
+          <div class="month-labels" id="monthLabels"></div>
+          <div class="heatmap" id="heatmap"></div>
+        </div>
+      </div>
+      <div class="legend"><span>少</span><i class="cell lvl-0"></i><i class="cell lvl-1"></i><i class="cell lvl-2"></i><i class="cell lvl-3"></i><i class="cell lvl-4"></i><span>多</span></div>
+    </div>
+    <div class="recent">
+      <h2>最近活跃</h2>
+      <ul id="recentDays"></ul>
+    </div>
+  </section>
+</main>
+
+<nav class="bottomnav" role="tablist" aria-label="主导航">
+  <button class="bnav-item" role="tab" data-view="board">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 5v14M12 5v9M18.5 5v12"/></svg>
+    <span>看板</span>
+  </button>
+  <button class="bnav-item" role="tab" data-view="inbox">
+    <span class="bnav-icon">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7.5"/><path d="M4 13.5h4.2l1.4 2.2h4.8l1.4-2.2H20V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
+      <span class="bnav-badge" id="navBadge" hidden>0</span>
+    </span>
+    <span>收件箱</span>
+  </button>
+  <button class="bnav-item" role="tab" data-view="calendar">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.4"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h3M13.5 13h3M7.5 16.5h3M13.5 16.5h3"/></svg>
+    <span>日历</span>
+  </button>
+</nav>
+
+<dialog id="detail" class="sheet" aria-label="任务详情">
+  <div class="sheet-head">
+    <button class="icon-btn back" id="sheetClose" aria-label="关闭">
+      <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <span class="task-id" id="d-id">T-1</span>
+    <span class="status-pill" id="d-status">待办</span>
+  </div>
+  <div class="sheet-body" id="sheetBody">
+    <h2 class="detail-title" id="d-title"></h2>
+    <div class="detail-meta" id="d-meta"></div>
+    <div class="detail-actions" id="d-actions"></div>
+    <h3 class="section-title">时间线</h3>
+    <ol class="timeline" id="d-timeline"></ol>
+  </div>
+  <div class="sheet-compose">
+    <div class="compose-ctx" id="composeCtx" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 9V5l-7 7 7 7v-4c5 0 8 1.6 10 5-1-5-4-9-10-11z"/></svg>
+      <span id="composeCtxLabel"></span>
+      <button type="button" id="composeCtxClear" aria-label="取消引用">×</button>
+    </div>
+    <div class="compose-row">
+      <textarea id="composeInput" rows="1" placeholder="回复这张卡…" enterkeyhint="send" aria-label="回复"></textarea>
+      <button class="send-btn" id="composeSend" aria-label="发送">
+        <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+      </button>
+    </div>
+  </div>
+</dialog>
+
+<div class="login-layer" id="login" hidden>
+  <form class="login-card" id="loginForm">
+    <div class="login-brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2.5" y="3" width="5" height="18" rx="2" fill="currentColor"/>
+        <rect x="9.5" y="3" width="5" height="12" rx="2" fill="currentColor" opacity=".7"/>
+        <rect x="16.5" y="3" width="5" height="15" rx="2" fill="currentColor" opacity=".44"/>
+      </svg>
+      <span>Agent Board</span>
+    </div>
+    <p class="login-sub">输入口令，查看任务与待拍板</p>
+    <label class="field">
+      <span>口令</span>
+      <input type="password" id="loginInput" autocomplete="current-password" inputmode="text" required>
+    </label>
+    <p class="login-error" id="loginError" role="alert"></p>
+    <button class="btn primary" type="submit">进入</button>
+  </form>
+</div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

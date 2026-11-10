@@ -1,0 +1,5 @@
+/agent-board
+/agent-board.exe
+*.db
+*.db-wal
+*.db-shm
