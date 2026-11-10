@@ -1,6 +1,14 @@
 /agent-board
 /agent-board.exe
+*.exe~
 *.db
 *.db-wal
 *.db-shm
-*~
+*.log
+
+# 本机数据：绝不入库
+.agent-board/
+data/
+demo/
+token
+password.txt

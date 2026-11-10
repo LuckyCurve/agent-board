@@ -210,11 +210,15 @@ func usage() {
   agent-board ask --task T-1 --question "..." [--options "同意,重做,稍后"]
   agent-board decisions [--status pending]
   agent-board watch [--consumer main] [--since N]
+  agent-board dispatch --seq N --to "Agent" [--note "..."]
   agent-board ack --seq N [--consumer main]
   agent-board take --seq N [--agent X]
   agent-board fail --seq N --reason "..."
   agent-board message --text "..."
   agent-board replies [--recent 20] [--free]
+  agent-board reset --yes          # 清空一切，编号重来
+  agent-board archive --yes        # 全部收进已完成，保留历史
+  agent-board board                # 当前数量
   agent-board passwd --password NEW
   agent-board token
   agent-board health
@@ -249,6 +253,8 @@ func main() {
 		cmdDecisions(os.Args[2:])
 	case "watch":
 		cmdWatch(os.Args[2:])
+	case "dispatch":
+		cmdDispatch(os.Args[2:])
 	case "ack":
 		cmdAck(os.Args[2:])
 	case "take":
@@ -259,6 +265,12 @@ func main() {
 		cmdMessage(os.Args[2:])
 	case "replies":
 		cmdReplies(os.Args[2:])
+	case "reset":
+		cmdBoardLifecycle(os.Args[2:], "reset")
+	case "archive":
+		cmdBoardLifecycle(os.Args[2:], "archive")
+	case "board":
+		cmdBoard(os.Args[2:])
 	case "passwd":
 		cmdPasswd(os.Args[2:])
 	case "token":

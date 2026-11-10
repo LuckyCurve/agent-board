@@ -41,6 +41,16 @@ func NewServer(store *Store, cfg Config, token, passHash string, sessionKey []by
 }
 
 func (s *Server) Run() error {
+	srv := &http.Server{
+		Addr:              s.cfg.Addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	log.Printf("agent-board %s listening on http://%s", s.cfg.Version, s.cfg.Addr)
+	return srv.ListenAndServe()
+}
+
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", s.handleHealth)
@@ -49,6 +59,9 @@ func (s *Server) Run() error {
 
 	mux.HandleFunc("GET /api/me", s.authed(s.handleMe))
 	mux.HandleFunc("POST /api/logout", s.authed(s.handleLogout))
+	mux.HandleFunc("POST /api/board/reset", s.authed(s.handleBoardReset))
+	mux.HandleFunc("POST /api/board/archive", s.authed(s.handleBoardArchive))
+	mux.HandleFunc("GET /api/board", s.authed(s.handleBoard))
 
 	mux.HandleFunc("GET /api/tasks", s.authed(s.handleTasks))
 	mux.HandleFunc("POST /api/tasks", s.authed(s.handleTaskCreate))
@@ -74,13 +87,7 @@ func (s *Server) Run() error {
 
 	mux.HandleFunc("GET /", s.handleStatic)
 
-	srv := &http.Server{
-		Addr:              s.cfg.Addr,
-		Handler:           s.withHeaders(mux),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	log.Printf("agent-board %s listening on http://%s", s.cfg.Version, s.cfg.Addr)
-	return srv.ListenAndServe()
+	return s.withHeaders(mux)
 }
 
 func (s *Server) withHeaders(next http.Handler) http.Handler {
@@ -185,6 +192,60 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": s.cfg.Version,
 		"time": time.Now().UTC().Format(time.RFC3339)})
+}
+
+// ---- board lifecycle (AI 是唯一驱动者) ----
+
+// POST /api/board/reset 清空一切并重置编号，相当于新会话开局。
+// 必须显式 confirm："reset"，避免误触。
+func (s *Server) handleBoardReset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	if req.Confirm != "reset" {
+		writeErr(w, http.StatusBadRequest, `confirm "reset" required`)
+		return
+	}
+	cleared, err := s.store.ResetBoard()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": cleared})
+}
+
+// POST /api/board/archive 保留历史，把所有卡移到已完成、待拍板标为已归档。
+func (s *Server) handleBoardArchive(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	if req.Confirm != "archive" {
+		writeErr(w, http.StatusBadRequest, `confirm "archive" required`)
+		return
+	}
+	archived, err := s.store.ArchiveBoard()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "archived": archived})
+}
+
+func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
+	counts, err := s.store.BoardCounts()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
 }
 
 // ---- tasks ----

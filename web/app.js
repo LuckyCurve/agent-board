@@ -288,7 +288,7 @@ function timelineHTML(events, replies) {
     }
     const k = eventKind(e);
     const r = repBySeq.get(e.seq);
-    out += `<li class="tl-item" data-seq="${e.seq}">
+    out += `<li class="tl-item ${esc(k.cls)}" data-seq="${e.seq}">
       <span class="tl-dot ${k.cls}"></span>
       <div class="tl-main">
         <div class="tl-head">
@@ -303,7 +303,7 @@ function timelineHTML(events, replies) {
         <p class="tl-body">${esc(e.body)}</p>
         ${quoteHTML(e, bySeq)}
         ${r ? `<div class="tl-status">${statusBadge(r)}</div>` : ''}
-        ${e.agent ? `<span class="tl-agent">${(e.kind === 'user_reply' || e.kind === 'user_reaction') ? '→ ' : ''}${esc(e.agent)}</span>` : ''}
+        ${e.agent && !r ? `<span class="tl-agent">${(e.kind === 'user_reply' || e.kind === 'user_reaction') ? '→ ' : ''}${esc(e.agent)}</span>` : ''}
       </div>
     </li>`;
   }
@@ -690,7 +690,7 @@ function setTheme(dark) {
   document.documentElement.classList.toggle('dark-theme', dark);
   try { localStorage.setItem('ab-theme', dark ? 'dark' : 'light'); } catch (_) {}
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', dark ? '#0e0f13' : '#f9f9fb');
+  if (meta) meta.setAttribute('content', dark ? '#15130f' : '#f3efe6');
   const btn = $('#themeToggle');
   if (btn) btn.innerHTML = dark ? SUN : MOON;
 }

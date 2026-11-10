@@ -455,6 +455,76 @@ func printEventLine(ev Event) {
 	}
 }
 
+func cmdDispatch(args []string) {
+	fs := flag.NewFlagSet("dispatch", flag.ExitOnError)
+	seq := fs.Int64("seq", -1, "reply event seq")
+	to := fs.String("to", "", "agent to dispatch to")
+	note := fs.String("note", "", "optional dispatch note")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if *seq < 0 || *to == "" {
+		fmt.Fprintln(os.Stderr, "usage: agent-board dispatch --seq N --to \"Agent\" [--note \"...\"]")
+		os.Exit(2)
+	}
+	c := mustClient(*token)
+	var pr struct {
+		Reply Reply `json:"reply"`
+	}
+	if err := c.do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
+		map[string]string{"status": "processing", "agent": *to}, &pr); err != nil {
+		fail(err)
+	}
+	text := "已派给 " + *to
+	if *note != "" {
+		text += "：" + *note
+	}
+	if pr.Reply.TaskID != "" {
+		data, _ := json.Marshal(map[string]int64{"reply_to_seq": *seq})
+		if err := c.do("POST", "/api/tasks/"+url.PathEscape(pr.Reply.TaskID)+"/events", map[string]string{
+			"kind": "dispatch", "text": text, "agent": *to, "data": string(data),
+		}, nil); err != nil {
+			fail(err)
+		}
+	}
+	fmt.Printf("ok reply=%d -> %s\n", *seq, *to)
+}
+
+func cmdBoardLifecycle(args []string, mode string) {
+	fs := flag.NewFlagSet(mode, flag.ExitOnError)
+	yes := fs.Bool("yes", false, "confirm the destructive action")
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	if !*yes {
+		if mode == "reset" {
+			fmt.Fprintln(os.Stderr, "reset 会清空所有任务、事件、待拍板和回执，编号重来。确认请加 --yes")
+		} else {
+			fmt.Fprintln(os.Stderr, "archive 会把所有卡收进已完成、未决项收口。确认请加 --yes")
+		}
+		os.Exit(2)
+	}
+	var resp map[string]any
+	if err := mustClient(*token).do("POST", "/api/board/"+mode,
+		map[string]string{"confirm": mode}, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok %s %v\n", mode, resp[mode])
+}
+
+func cmdBoard(args []string) {
+	fs := flag.NewFlagSet("board", flag.ExitOnError)
+	token := fs.String("token", "", "bearer token")
+	fs.Parse(args)
+	var resp struct {
+		Counts map[string]int `json:"counts"`
+	}
+	if err := mustClient(*token).do("GET", "/api/board", nil, &resp); err != nil {
+		fail(err)
+	}
+	fmt.Printf("tasks=%d events=%d decisions=%d 待拍板=%d 未结回执=%d\n",
+		resp.Counts["tasks"], resp.Counts["events"], resp.Counts["decisions"],
+		resp.Counts["pending_decisions"], resp.Counts["open_replies"])
+}
+
 func cmdTake(args []string) {
 	fs := flag.NewFlagSet("take", flag.ExitOnError)
 	seq := fs.Int64("seq", -1, "reply event seq")

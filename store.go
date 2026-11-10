@@ -419,6 +419,7 @@ func (s *Store) GetTask(taskID string) (Task, []Event, error) {
 		return t, nil, err
 	}
 	evs, err := s.EventsByTask(taskID, 1000)
+	t.LastEvent, _ = s.lastEvent(taskID)
 	t.Reply = s.openReplyForTask(taskID)
 	return t, evs, err
 }
@@ -760,4 +761,128 @@ func (s *Store) Ack(name string, seq int64) error {
 	_, err := s.db.Exec(`UPDATE consumers SET acked_seq=MAX(acked_seq,?), lease_seq=0, lease_until=0
 		WHERE name=?`, seq, name)
 	return err
+}
+
+// ---- board lifecycle ----
+//
+// 看板不是人的资产：会话退出、状态无法复原时，主 Agent 可以直接重开一局。
+// 所有入口都需要显式 confirm，避免手滑。
+
+func (s *Store) BoardCounts() (map[string]int, error) {
+	var tasks, events, decisions, pendingDecisions, openReplies int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&tasks); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&events); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&decisions); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM decisions WHERE status='pending'`).Scan(&pendingDecisions); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM replies WHERE status IN ('received','processing')`).Scan(&openReplies); err != nil {
+		return nil, err
+	}
+	return map[string]int{
+		"tasks": tasks, "events": events, "decisions": decisions,
+		"pending_decisions": pendingDecisions, "open_replies": openReplies,
+	}, nil
+}
+
+// ResetBoard 清空任务、事件、待拍板、回执和消费游标，编号从 T-1 / D-1 重新开始。
+func (s *Store) ResetBoard() (map[string]int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	cleared := map[string]int{}
+	for name, table := range map[string]string{
+		"tasks": "tasks", "events": "events", "decisions": "decisions",
+		"replies": "replies", "consumers": "consumers",
+	} {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+			return nil, err
+		}
+		cleared[name] = n
+		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
+			return nil, err
+		}
+	}
+	// 事件表是 AUTOINCREMENT，删除 sqlite_sequence 才能让 seq 回到 1。
+	if _, err := tx.Exec(`DELETE FROM sqlite_sequence WHERE name='events'`); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM meta WHERE k IN ('task_seq','decision_seq')`); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return cleared, nil
+}
+
+// ArchiveBoard 保留事件历史，把未完成的卡收进已完成，待拍板与未结回执一起收口。
+func (s *Store) ArchiveBoard() (map[string]int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	ts := nowISO()
+
+	rows, err := tx.Query(`SELECT id FROM tasks WHERE column_name<>'done'`)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, id := range ids {
+		if _, err := tx.Exec(`UPDATE tasks SET column_name='done', updated_at=? WHERE id=?`, ts, id); err != nil {
+			return nil, err
+		}
+		seq, _, err := insertEvent(tx, &Event{Type: "task.archived", TaskID: id,
+			Kind: "moved", Body: "已归档"})
+		if err != nil {
+			return nil, err
+		}
+		if err := touchTask(tx, id, seq); err != nil {
+			return nil, err
+		}
+	}
+
+	resD, err := tx.Exec(`UPDATE decisions SET status='archived', answered_at=?
+		WHERE status='pending'`, ts)
+	if err != nil {
+		return nil, err
+	}
+	nD, _ := resD.RowsAffected()
+
+	resR, err := tx.Exec(`UPDATE replies SET status='done', note='已归档', updated_at=?
+		WHERE status IN ('received','processing','failed','timeout')`, ts)
+	if err != nil {
+		return nil, err
+	}
+	nR, _ := resR.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return map[string]int{"tasks": len(ids), "decisions": int(nD), "replies": int(nR)}, nil
 }
