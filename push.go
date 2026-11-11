@@ -1,14 +1,27 @@
 package main
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	webpush "github.com/SherClockHolmes/webpush-go"
+	"golang.org/x/crypto/hkdf"
 )
 
 // pushMessage 是推到通知栏的内容；task_id 让点击通知能回到对应卡片。
@@ -59,6 +72,7 @@ var (
 )
 
 // ensureVAPID 首次用时生成密钥并落库，重启后沿用；订阅者不会因此失效。
+// 私钥存 base64url 的标量，公钥存 base64url 的非压缩点，和浏览器端一致。
 func (s *Server) ensureVAPID() (priv, pub string, err error) {
 	vapidMu.Lock()
 	defer vapidMu.Unlock()
@@ -80,7 +94,7 @@ func (s *Server) ensureVAPID() (priv, pub string, err error) {
 		return "", "", err
 	}
 	if priv == "" || pub == "" {
-		priv, pub, err = webpush.GenerateVAPIDKeys()
+		priv, pub, err = generateVAPID()
 		if err != nil {
 			return "", "", err
 		}
@@ -93,6 +107,15 @@ func (s *Server) ensureVAPID() (priv, pub string, err error) {
 	}
 	vapidPriv, vapidPub = priv, pub
 	return priv, pub, nil
+}
+
+func generateVAPID() (priv, pub string, err error) {
+	k, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(k.Bytes()),
+		base64.RawURLEncoding.EncodeToString(k.PublicKey().Bytes()), nil
 }
 
 // notify 异步把通知发给所有订阅端；失效订阅（404/410）顺手删掉。
@@ -124,17 +147,7 @@ func (s *Server) sendPush(msg pushMessage) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, sub := range subs {
-		resp, err := webpush.SendNotification(payload, &webpush.Subscription{
-			Endpoint: sub.Endpoint,
-			Keys:     webpush.Keys{Auth: sub.Auth, P256dh: sub.P256dh},
-		}, &webpush.Options{
-			Subscriber:      "mailto:agent-board@localhost",
-			VAPIDPublicKey:  pub,
-			VAPIDPrivateKey: priv,
-			TTL:             3600,
-			Urgency:         webpush.UrgencyHigh,
-			HTTPClient:      client,
-		})
+		resp, err := sendWebPush(client, payload, sub.Endpoint, sub.P256dh, sub.Auth, pub, priv)
 		if err != nil {
 			log.Printf("push: send: %v", err)
 			continue
@@ -144,6 +157,141 @@ func (s *Server) sendPush(msg pushMessage) {
 			_ = s.store.DeletePushSub(sub.Endpoint)
 		}
 	}
+}
+
+// sendWebPush 按 RFC 8291 加密正文、按 VAPID 签名，POST 给推送服务。
+// 盐放 Encryption 头、服务端公钥放 Crypto-Key 头，正文只有密文——
+// Chrome（FCM）和 iOS 只认这个格式。
+func sendWebPush(client *http.Client, payload []byte, endpoint, p256dh, auth, vapidPub, vapidPriv string) (*http.Response, error) {
+	body, salt, asPub, err := encryptPush(payload, p256dh, auth)
+	if err != nil {
+		return nil, err
+	}
+	header, err := vapidHeader(endpoint, vapidPub, vapidPriv, time.Now().Add(12*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Encoding", "aes128gcm")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("TTL", "3600")
+	req.Header.Set("Urgency", "high")
+	req.Header.Set("Encryption", "salt="+salt)
+	req.Header.Set("Crypto-Key", "dh="+asPub)
+	req.Header.Set("Authorization", header)
+	return client.Do(req)
+}
+
+// encryptPush 是浏览器那头的解密过程的反面：RFC 8291 + RFC 8188。
+func encryptPush(payload []byte, p256dh, auth string) (body []byte, saltB64, asPubB64 string, err error) {
+	uaPub, err := b64Decode(p256dh)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("p256dh: %w", err)
+	}
+	authSecret, err := b64Decode(auth)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("auth: %w", err)
+	}
+	remote, err := ecdh.P256().NewPublicKey(uaPub)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("p256dh: %w", err)
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, "", "", err
+	}
+	eph, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, "", "", err
+	}
+	shared, err := eph.ECDH(remote)
+	if err != nil {
+		return nil, "", "", err
+	}
+	asPub := eph.PublicKey().Bytes()
+
+	info := make([]byte, 0, len("WebPush: info\x00")+len(uaPub)+len(asPub))
+	info = append(info, "WebPush: info\x00"...)
+	info = append(info, uaPub...)
+	info = append(info, asPub...)
+	ikm := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, shared, authSecret, info), ikm); err != nil {
+		return nil, "", "", err
+	}
+	cek := make([]byte, 16)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, salt, []byte("Content-Encoding: aes128gcm\x00")), cek); err != nil {
+		return nil, "", "", err
+	}
+	nonce := make([]byte, 12)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, ikm, salt, []byte("Content-Encoding: nonce\x00")), nonce); err != nil {
+		return nil, "", "", err
+	}
+	block, err := aes.NewCipher(cek)
+	if err != nil {
+		return nil, "", "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, "", "", err
+	}
+	// 末尾放填充分隔符 0x02，收端据此去掉尾部填充。
+	plain := make([]byte, 0, len(payload)+1)
+	plain = append(plain, payload...)
+	plain = append(plain, 0x02)
+	body = gcm.Seal(nil, nonce, plain, []byte("aes128gcm"))
+	return body, base64.RawURLEncoding.EncodeToString(salt), base64.RawURLEncoding.EncodeToString(asPub), nil
+}
+
+// vapidHeader 生成 "vapid t=<jwt>, k=<公钥>"，JWT 用 ES256 签，aud 是推送服务的来源。
+func vapidHeader(endpoint, vapidPub, vapidPriv string, exp time.Time) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	privBytes, err := b64Decode(vapidPriv)
+	if err != nil {
+		return "", fmt.Errorf("vapid private: %w", err)
+	}
+	d := new(big.Int).SetBytes(privBytes)
+	x, y := elliptic.P256().ScalarBaseMult(privBytes)
+	key := &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y},
+		D:         d,
+	}
+	head := b64JSON(map[string]any{"typ": "JWT", "alg": "ES256"})
+	claims := b64JSON(map[string]any{
+		"aud": u.Scheme + "://" + u.Host,
+		"exp": exp.Unix(),
+		"sub": "mailto:agent-board@localhost",
+	})
+	signing := head + "." + claims
+	sum := sha256.Sum256([]byte(signing))
+	r, s, err := ecdsa.Sign(rand.Reader, key, sum[:])
+	if err != nil {
+		return "", err
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return "vapid t=" + signing + "." + base64.RawURLEncoding.EncodeToString(sig) +
+		", k=" + vapidPub, nil
+}
+
+func b64JSON(v any) string {
+	b, _ := json.Marshal(v)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// b64Decode 浏览器给的 base64url 可能带填充也可能不带，两种都收。
+func b64Decode(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "=")); err == nil {
+		return b, nil
+	}
+	return base64.URLEncoding.DecodeString(s)
 }
 
 // GET /api/push/key 把公钥给前端，用来 pushManager.subscribe。
