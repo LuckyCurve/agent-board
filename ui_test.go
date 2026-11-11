@@ -70,6 +70,25 @@ func TestPushButtonHiddenUntilSupported(t *testing.T) {
 	}
 }
 
+// 对话页高度靠 flex 分配，不能手算「视口减顶栏」——筛选项出现后输入框会被底栏盖住。
+func TestInboxHeightIsFlexNotCalc(t *testing.T) {
+	e := newTestEnv(t)
+	css := getPageBody(t, e, "/app.css")
+	start := strings.Index(css, `body[data-view="inbox"] {`)
+	if start < 0 {
+		t.Fatal("app.css 缺少对话页布局规则")
+	}
+	rule := css[start:strings.Index(css[start:], "}")+start]
+	for _, want := range []string{"display: flex", "flex-direction: column", "height: calc(100dvh"} {
+		if !strings.Contains(rule, want) {
+			t.Fatalf("对话页应由 body 纵向 flex 撑满：缺 %q\n%s", want, rule)
+		}
+	}
+	if strings.Contains(css, "height: calc(100dvh - var(--topbar-h)") {
+		t.Fatal("对话页高度别再手减顶栏，筛选项会把输入框推到导航底下")
+	}
+}
+
 func TestDetailTitleIsFocusable(t *testing.T) {
 	e := newTestEnv(t)
 	body := getPageBody(t, e, "/")

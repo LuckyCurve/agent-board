@@ -547,10 +547,21 @@ svg { display: block; }
 
 .inbox { display: flex; flex-direction: column; gap: 12px; max-width: 780px; }
 
-/* 收件箱按 IM 布局：消息区滚动，输入框钉在底部。 */
-body[data-view="inbox"] { overflow: hidden; }
+/* 收件箱按 IM 布局：消息区滚动，输入框钉在底部。
+   整页交给 flex 分配高度，别再手算「100dvh 减顶栏」——筛选项一出现就会算漏，
+   输入框会被推到固定底栏底下。 */
+body[data-view="inbox"] {
+  overflow: hidden;
+  height: calc(100dvh - var(--kb, 0px));
+  display: flex;
+  flex-direction: column;
+}
+body[data-view="inbox"] .topbar,
+body[data-view="inbox"] .filterbar { flex: none; }
 body[data-view="inbox"] .main {
-  height: calc(100dvh - var(--topbar-h) - var(--kb, 0px));
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
   display: flex;
   padding-bottom: 20px;
   overflow: hidden;
