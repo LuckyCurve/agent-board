@@ -77,3 +77,33 @@ func TestDetailTitleIsFocusable(t *testing.T) {
 		t.Fatal("detail title should be programmatically focusable")
 	}
 }
+
+func TestCardsHaveNoComposerAndCanBeQuoted(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	for _, bad := range []string{"composeInput", "composeSend", `id="composeCtx"`} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("card detail should not host a chat composer (%s)", bad)
+		}
+	}
+	if !strings.Contains(body, `id="dQuoteChat"`) {
+		t.Fatal("card detail should offer 回到对话并引用")
+	}
+	js := getPageBody(t, e, "/app.js")
+	if !strings.Contains(js, `data-quote=`) {
+		t.Fatal("board cards should offer a 引用 button that jumps into chat")
+	}
+}
+
+func TestComposerHasPlusMenuAndActiveTask(t *testing.T) {
+	e := newTestEnv(t)
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{`id="plusBtn"`, `id="plusMenu"`, `id="activeTaskBar"`} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("composer missing %s", want)
+		}
+	}
+	if strings.Contains(js, `id="attachBtn"`) || strings.Contains(js, `id="camBtn"`) {
+		t.Fatal("the composer should have one + button, not separate image buttons")
+	}
+}

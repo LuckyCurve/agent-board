@@ -8,10 +8,12 @@ const COLUMNS = [
   { key: 'doing', label: '进行中' },
   { key: 'blocked', label: '阻塞' },
   { key: 'done', label: '已完成' },
+  { key: 'archived', label: '归档' },
 ];
 
 const state = {
   tasks: [],
+  archived: [],
   decisions: [],
   chat: [],
   activity: [],
@@ -30,12 +32,16 @@ let draftText = '';
 let freeDraft = '';
 let refreshTimer = null;
 let es = null;
+let lastEventSeq = 0;      // 本页见过的最大 seq，唤醒/重连时按它补拉
+let pollTimer = null;
 let chatPinned = true;     // 消息流是否贴着底部；用户往上翻时关闭
 let pendingOpen = false;   // 「等你决定」列表是否展开
 let flashSeq = 0;          // 刚从待拍板跳进来的消息，渲染后闪一下
 let pendingImages = [];    // 已上传、等随消息发出的图片 id
-let uploadingImages = 0;   // 还在上传的张数
+let activeTaskID = '';    // 对话里引用的任务：之后发的消息都挂到这张卡
+let plusOpen = false;
 let systemNote = '';       // /状态 等本地提示，不落库
+try { activeTaskID = localStorage.getItem('ab-active-task') || ''; } catch (_) {}
 
 function chatNearBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= 60;
@@ -172,6 +178,55 @@ async function refreshTasks() {
   if (state.view === 'board') renderBoard();
 }
 
+async function refreshArchived() {
+  const data = await api('/api/tasks?view=archived');
+  state.archived = data.tasks || [];
+  if (state.view === 'archive') renderArchive();
+}
+
+async function moveTask(id, column, note) {
+  try {
+    await api('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: { column } });
+    toast(note || '已移动');
+    await Promise.all([refreshTasks(), refreshArchived(), refreshDecisions()]);
+    if (state.view === 'inbox') await refreshChat();
+  } catch (e) {
+    toast('操作失败：' + e.message, 'bad');
+  }
+}
+
+async function deleteTask(id) {
+  if (!window.confirm('永久删除这张卡？事件会留作审计，但卡片不可恢复。')) return;
+  try {
+    await api('/api/tasks/' + encodeURIComponent(id) + '?confirm=yes', { method: 'DELETE' });
+    toast('已删除');
+    await Promise.all([refreshTasks(), refreshArchived(), refreshDecisions()]);
+    if (state.view === 'inbox') await refreshChat();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'bad');
+  }
+}
+
+function renderArchive() {
+  const el = $('#archiveList');
+  if (!el) return;
+  const n = state.archived.length;
+  const count = $('#archiveCount');
+  if (count) count.textContent = String(n);
+  el.innerHTML = n ? state.archived.map(t => `<article class="archive-row" data-id="${esc(t.id)}">
+    <div class="ar-main">
+      <span class="task-id">${esc(t.id)}</span>
+      <b>${esc(t.title)}</b>
+      <span class="ar-meta">${esc(t.agent || '')} · ${rel(t.updated_at)}</span>
+    </div>
+    <div class="ar-actions">
+      <button class="btn ghost" data-restore="${esc(t.id)}">恢复</button>
+      <button class="btn ghost danger" data-delete="${esc(t.id)}">删除</button>
+    </div>
+  </article>`).join('')
+    : '<div class="empty"><div class="e-title">还没有归档</div><div class="e-sub">把看板最右「归档」列里的卡片拖过去，或在卡片详情里一键归档</div></div>';
+}
+
 async function refreshDecisions() {
   const data = await api('/api/decisions?status=pending');
   state.decisions = data.decisions || [];
@@ -222,7 +277,7 @@ function cardHTML(t) {
     ? `<div class="reply-strip ${esc(r.status)}">${statusBadge(r)}</div>` : '';
   const alertHTML = alert && alert.kind === 'failed'
     ? `<div class="card-alert"><b>${esc(alert.label)}</b><span>${esc(trunc(alert.reason, 64))}</span></div>` : '';
-  return `<article class="card" data-id="${esc(t.id)}" tabindex="0" role="button" aria-label="${esc(t.title)}">
+  return `<article class="card" data-id="${esc(t.id)}" draggable="true" tabindex="0" role="button" aria-label="${esc(t.title)}">
     <div class="card-top">
       <span class="status-dot ${esc(t.column)}"></span>
       <span class="task-id">${esc(t.id)}</span>
@@ -236,6 +291,7 @@ function cardHTML(t) {
       ${t.project ? `<span class="chip">${esc(t.project)}</span>` : ''}
       ${t.agent ? `<span class="chip ghost">${esc(t.agent)}</span>` : ''}
       ${t.pending_decisions > 0 ? `<span class="badge warn">待拍板 ${t.pending_decisions}</span>` : ''}
+      <button type="button" class="card-quote" data-quote="${esc(t.id)}">引用</button>
     </div>
   </article>`;
 }
@@ -244,15 +300,16 @@ function renderBoard() {
   const board = $('#board');
   if (!board) return;
   board.innerHTML = COLUMNS.map(col => {
-    const items = state.tasks.filter(t => t.column === col.key);
-    return `<section class="column" data-col="${col.key}">
+    const items = col.key === 'archived' ? [] : state.tasks.filter(t => t.column === col.key);
+    return `<section class="column" data-col="${col.key}" data-drop="1">
       <header class="col-head">
         <span class="col-dot ${col.key}"></span>
         <h2>${col.label}</h2>
         <span class="col-count">${items.length}</span>
       </header>
       <div class="col-body">
-        ${items.length ? items.map(cardHTML).join('') : '<div class="col-empty">暂无任务</div>'}
+        ${col.key === 'archived' ? '<div class="col-empty">把卡片拖到这里归档</div>' :
+          (items.length ? items.map(cardHTML).join('') : '<div class="col-empty">暂无任务</div>')}
       </div>
     </section>`;
   }).join('');
@@ -407,8 +464,6 @@ async function refreshDetail(id, keepScroll) {
   const body = $('#sheetBody');
   const atBottom = !keepScroll || (body.scrollHeight - body.scrollTop - body.clientHeight < 48);
 
-  captureDraft();
-
   $('#d-id').textContent = task.id;
   $('#d-status').textContent = colLabel(task.column);
   $('#d-status').className = 'status-pill col-' + task.column;
@@ -426,11 +481,11 @@ async function refreshDetail(id, keepScroll) {
   if (detailFromSeq) {
     actions += `<button class="btn ghost d-back-chat" id="dBackChat" data-seq="${detailFromSeq}">← 回到对话 #${detailFromSeq}</button>`;
   }
+  if (task.column !== 'archived') {
+    actions += `<button class="btn ghost" id="dArchive">收进归档</button>`;
+  }
   $('#d-actions').innerHTML = actions + pendingHTML(decisions || []);
   $('#d-timeline').innerHTML = timelineHTML(events || [], replies || []);
-
-  restoreDraft();
-  updateComposeCtx();
 
   if (!keepScroll || atBottom) body.scrollTop = body.scrollHeight;
 }
@@ -445,69 +500,11 @@ function closeSheet() {
   if (location.hash.includes('task=')) history.replaceState(null, '', location.pathname);
 }
 
-function captureDraft() {
-  const el = $('#composeInput');
-  if (el) draftText = el.value;
-}
-
-function restoreDraft() {
-  const el = $('#composeInput');
-  if (el && draftText) {
-    el.value = draftText;
-    autogrow(el);
-  }
-}
-
-function updateComposeCtx() {
-  const ctx = $('#composeCtx');
-  const label = $('#composeCtxLabel');
-  if (!ctx) return;
-  if (replyTo) {
-    ctx.hidden = false;
-    label.textContent = '回复 #' + replyTo;
-  } else {
-    ctx.hidden = true;
-  }
-}
-
 /* ---------- composing ---------- */
 
 function autogrow(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 140) + 'px';
-}
-
-async function sendReply() {
-  const input = $('#composeInput');
-  const text = (input.value || '').trim();
-  if (!text || !openTaskId) return;
-  const btn = $('#composeSend');
-  btn.disabled = true;
-  btn.classList.add('sending');
-  const data = replyTo ? JSON.stringify({ reply_to_seq: replyTo }) : '{}';
-  try {
-    await api('/api/tasks/' + encodeURIComponent(openTaskId) + '/events', {
-      method: 'POST',
-      body: { kind: 'user_reply', text, agent: '', data, key: uid() },
-    });
-    input.value = '';
-    draftText = '';
-    autogrow(input);
-    replyTo = null;
-    updateComposeCtx();
-    toast('已收到，交给主会话');
-    await Promise.all([refreshTasks(), refreshDecisions(), refreshDetail(openTaskId, false)]);
-    if (state.view === 'board') renderBoard();
-  } catch (e) {
-    if (e.message !== 'unauthorized') toast('发送失败：' + e.message, 'bad');
-  } finally {
-    btn.disabled = false;
-    btn.classList.remove('sending');
-    // 刷新可能换掉输入框，重新取一次再聚焦。
-    const live = $('#composeInput');
-    if (live) live.focus();
-    else input.focus();
-  }
 }
 
 async function answerDecision(id, value) {
@@ -542,6 +539,46 @@ function statusSummary() {
     return a && a.kind === 'failed';
   }).length;
   return `进行中 ${doing} · 待拍板 ${state.decisions.length} · 阻塞/失败 ${failed || blocked} · 已完成 ${done}`;
+}
+
+function setActiveTask(id) {
+  activeTaskID = id || '';
+  try {
+    if (activeTaskID) localStorage.setItem('ab-active-task', activeTaskID);
+    else localStorage.removeItem('ab-active-task');
+  } catch (_) {}
+  renderComposeContext();
+}
+
+function renderComposeContext() {
+  const box = $('#activeTaskBar');
+  if (!box) return;
+  const t = activeTaskID ? taskById(activeTaskID) : null;
+  box.hidden = !t;
+  if (!t) return;
+  box.innerHTML = `<button type="button" class="at-open" data-task="${esc(t.id)}" title="打开卡片">
+      <span class="at-id">${esc(t.id)}</span><span class="at-title">${esc(trunc(t.title, 40))}</span>
+    </button>
+    <button type="button" class="at-x" id="activeTaskClear" aria-label="取消引用">×</button>`;
+}
+
+function renderPlusMenu() {
+  const m = $('#plusMenu');
+  if (!m) return;
+  m.hidden = !plusOpen;
+  if (!plusOpen) return;
+  const tasks = state.tasks.filter(t => t.column === 'doing' || t.column === 'todo').slice(0, 8);
+  m.innerHTML = `
+    <button type="button" data-attach>选图片</button>
+    <button type="button" data-camera>拍照</button>
+    <div class="pm-label">引用任务</div>
+    ${tasks.length ? tasks.map(t => `<button type="button" data-select-task="${esc(t.id)}">${esc(t.id)} · ${esc(trunc(t.title, 24))}</button>`).join('')
+      : '<div class="pm-empty">还没有进行中的任务</div>'}`;
+}
+
+function closePlusMenu() {
+  plusOpen = false;
+  renderPlusMenu();
 }
 
 function clearComposeImages() {
@@ -638,7 +675,7 @@ async function sendFreeMessage(text) {
     return;
   }
   try {
-    await api('/api/message', { method: 'POST', body: { text, images, key: uid() } });
+    await api('/api/message', { method: 'POST', body: { text, images, task_id: activeTaskID || '', key: uid() } });
     // 先清掉草稿和当前框里的字，刷新后 renderInbox 才不会把旧内容填回去。
     systemNote = '';
     freeDraft = '';
@@ -657,11 +694,11 @@ async function sendFreeMessage(text) {
   }
 }
 
-// 输入框指令只做三件事：看状态、建卡派人、挂待拍板。
+// 输入框指令：看状态、引用/取消任务、建卡派人、挂待拍板。
 async function runCommand(text) {
-  const m = /^\/(状态|派|拍板)\s*([\s\S]*)$/.exec(text);
+  const m = /^\/(状态|任务|取消|派|拍板)\s*([\s\S]*)$/.exec(text);
   if (!m) {
-    toast('未知指令。可用：/状态、/派 X …、/拍板 T-1 …', 'bad');
+    toast('未知指令。可用：/状态、/任务 T-1、/取消、/派 X …、/拍板 T-1 …', 'bad');
     return;
   }
   const cmd = m[1];
@@ -672,6 +709,21 @@ async function runCommand(text) {
       renderInbox();
       requestAnimationFrame(scrollChatBottom);
       clearFreeInput();
+      return;
+    }
+    if (cmd === '取消') {
+      setActiveTask('');
+      clearFreeInput();
+      toast('已取消引用');
+      return;
+    }
+    if (cmd === '任务') {
+      const id = rest.toUpperCase();
+      const t = state.tasks.find(x => x.id === id);
+      if (!t) { toast('没找到这张卡。用法：/任务 T-1', 'bad'); return; }
+      setActiveTask(t.id);
+      clearFreeInput();
+      toast(`已引用 ${t.id}，之后的消息都挂到这张卡`);
       return;
     }
 
@@ -784,14 +836,28 @@ function taskAlert(t) {
   return { kind: 'doing', label: '进行中', reason: '' };
 }
 
+function quoteTask(id) {
+  setActiveTask(id);
+  const dlg = $('#detail');
+  if (dlg && dlg.open) closeSheet();
+  setView('inbox');
+  setTimeout(() => {
+    const fi = $('#freeInput');
+    if (fi) fi.focus();
+  }, 60);
+  toast(`已引用 ${id}，在对话里继续说`);
+}
+
 function messageHTML(m) {
   const agent = m.author && m.author !== 'user';
   const who = agent ? m.author : '你';
   const t = m.link_task ? taskById(m.link_task) : null;
   const sig = t ? taskAlert(t) : null;
-  const chip = sig
-    ? `<button class="msg-task ${sig.kind}" data-task="${esc(t.id)}" data-msg="${m.seq}" title="打开 ${esc(t.id)}">
-         <span class="mt-id">${esc(t.id)}</span><span class="mt-label">${esc(sig.label)}</span>
+  const quote = t
+    ? `<button class="msg-quote" data-task="${esc(t.id)}" data-msg="${m.seq}" title="打开 ${esc(t.id)}">
+         <span class="mq-id">${esc(t.id)}</span>
+         <span class="mq-title">${esc(trunc(t.title, 40))}</span>
+         ${sig ? `<span class="mq-state ${sig.kind}">${esc(sig.label)}</span>` : ''}
        </button>`
     : '';
   const alert = sig && sig.kind === 'failed' && sig.reason
@@ -799,10 +865,11 @@ function messageHTML(m) {
     : '';
   return `<li class="msg-item${agent ? ' agent' : ''}${sig && sig.kind === 'failed' ? ' danger' : ''}" data-seq="${m.seq}">
     <div class="msg-who">${esc(who)}</div>
+    ${quote}
     ${m.body ? `<div class="msg-text">${esc(m.body)}</div>` : ''}
     ${imagesHTML(m.data)}
     ${alert}
-    <div class="msg-foot">${chip}<time>${rel(m.created_at)}</time></div>
+    <div class="msg-foot"><time>${rel(m.created_at)}</time></div>
   </li>`;
 }
 
@@ -879,8 +946,7 @@ function renderInbox() {
   const msgs = state.chat.slice().reverse();
   const msgList = (msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>')
     + (systemNote ? `<li class="msg-system">${esc(systemNote)}</li>` : '');
-  el.innerHTML = `
-    <div class="inbox-scroll" id="inboxScroll">
+  const scrollHTML = `
       <section class="inbox-section">
         <h2 class="sec-h">待拍板 <span>${pending.length}</span></h2>
         ${decisionsHTML}
@@ -888,16 +954,15 @@ function renderInbox() {
       <section class="inbox-section chat-section">
         <h2 class="sec-h">跟主会话说一句</h2>
         <ul class="msg-list" id="msgList">${msgList}</ul>
-      </section>
-    </div>
+      </section>`;
+  const formHTML = `
     <form class="free-compose" id="freeForm">
       <div class="compose-images" id="freeImages" hidden></div>
+      <div class="active-task" id="activeTaskBar" hidden></div>
+      <div class="plus-menu" id="plusMenu" hidden></div>
       <div class="free-row">
-        <button type="button" class="attach-btn" data-attach aria-label="选择图片" title="选择图片">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/></svg>
-        </button>
-        <button type="button" class="attach-btn" data-camera aria-label="拍照" title="拍照">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.6-2h6.8L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.2"/></svg>
+        <button type="button" class="attach-btn" id="plusBtn" aria-label="更多" title="更多" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button>
         <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="发消息…">${esc(freeDraft)}</textarea>
         <button class="send-btn" type="submit" aria-label="发送">
@@ -907,13 +972,29 @@ function renderInbox() {
       <input type="file" id="freeFile" accept="image/png,image/jpeg,image/webp" multiple hidden>
       <input type="file" id="freeCam" accept="image/*" capture="environment" hidden>
     </form>`;
+
+  // 输入框不重画：消息刷新时正在打字也不能掉焦点、丢草稿。
+  const liveForm = el.querySelector('#freeForm');
+  if (liveForm) {
+    const sc = el.querySelector('#inboxScroll');
+    if (sc) sc.innerHTML = scrollHTML;
+  } else {
+    el.innerHTML = `<div class="inbox-scroll" id="inboxScroll">${scrollHTML}</div>${formHTML}`;
+  }
   renderComposeImages();
+  renderComposeContext();
+  renderPlusMenu();
+  const plus = $('#plusBtn');
+  if (plus) plus.setAttribute('aria-expanded', plusOpen ? 'true' : 'false');
   const fi = $('#freeInput');
   if (fi) autogrow(fi);
 
   const sc = $('#inboxScroll');
   if (sc) {
-    sc.addEventListener('scroll', () => { chatPinned = chatNearBottom(sc); }, { passive: true });
+    if (!sc.dataset.scrollBound) {
+      sc.dataset.scrollBound = '1';
+      sc.addEventListener('scroll', () => { chatPinned = chatNearBottom(sc); }, { passive: true });
+    }
     // 默认贴底；用户翻历史时保留原来的位置，不被新消息拽走。
     requestAnimationFrame(() => {
       const target = flashSeq ? sc.querySelector(`.msg-item[data-seq="${flashSeq}"]`) : null;
@@ -1004,7 +1085,7 @@ function renderCalendar() {
 /* ---------- views ---------- */
 
 function setView(v, fromHash) {
-  if (!['board', 'inbox', 'calendar'].includes(v)) v = 'inbox';
+  if (!['board', 'inbox', 'calendar', 'archive'].includes(v)) v = 'inbox';
   state.view = v;
   document.body.dataset.view = v;
   if (v === 'inbox') chatPinned = true;
@@ -1023,11 +1104,13 @@ function setView(v, fromHash) {
   if (v === 'board') renderBoard();
   if (v === 'inbox') { renderInbox(); refreshChat().catch(() => {}); }
   if (v === 'calendar') { renderCalendar(); refreshActivity().catch(() => {}); }
+  if (v === 'archive') { renderArchive(); refreshArchived().catch(() => {}); }
 }
 
 function viewFromHash() {
   const h = location.hash.replace('#', '');
   if (h.startsWith('task=') || h === 'board') return 'board';
+  if (h === 'archive') return 'archive';
   return h === 'calendar' ? 'calendar' : 'inbox';
 }
 
@@ -1056,31 +1139,68 @@ function toggleTheme() {
 
 /* ---------- realtime ---------- */
 
+async function syncNow() {
+  if (syncNow.running) return;
+  syncNow.running = true;
+  try {
+    await refreshTasks();
+    await refreshDecisions();
+    if (state.view === 'calendar') await refreshActivity();
+    if (state.view === 'archive') await refreshArchived();
+    if (state.view === 'inbox') await refreshChat();
+    if (openTaskId) await refreshDetail(openTaskId, true);
+  } catch (_) {
+  } finally {
+    syncNow.running = false;
+  }
+}
+
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(async () => {
-    try {
-      await refreshTasks();
-      await refreshDecisions();
-      if (state.view === 'calendar') await refreshActivity();
-      if (state.view === 'inbox') await refreshChat();
-      if (openTaskId) await refreshDetail(openTaskId, true);
-    } catch (_) {}
-  }, 160);
+  refreshTimer = setTimeout(() => syncNow().catch(() => {}), 160);
 }
 
 function connectSSE() {
   if (es) return;
   const live = $('#live');
-  es = new EventSource('/api/stream?token=' + encodeURIComponent(API_TOKEN));
-  es.addEventListener('hello', () => live && live.classList.remove('off'));
-  es.addEventListener('change', () => {
+  const since = lastEventSeq ? '&since=' + lastEventSeq : '';
+  es = new EventSource('/api/stream?token=' + encodeURIComponent(API_TOKEN) + since);
+  es.addEventListener('hello', e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.seq > lastEventSeq) lastEventSeq = d.seq;
+    } catch (_) {}
+    live && live.classList.remove('off');
+    scheduleRefresh();
+  });
+  es.addEventListener('change', e => {
     if (live) live.classList.remove('off');
+    try {
+      const d = JSON.parse(e.data);
+      if (d.seq > lastEventSeq) lastEventSeq = d.seq;
+    } catch (_) {}
     scheduleRefresh();
   });
   es.onerror = () => {
+    // 移动浏览器会掐断后台 SSE；EventSource 自带重连，唤醒时再强制同步一次。
     if (live) live.classList.add('off');
+    if (!document.hidden) scheduleRefresh();
   };
+}
+
+function installLifecycleSync() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    scheduleRefresh();
+    if (es && es.readyState === EventSource.CLOSED) {
+      es.close();
+      es = null;
+      connectSSE();
+    }
+  });
+  window.addEventListener('focus', () => { if (!document.hidden) scheduleRefresh(); });
+  // 前台每 20 秒兜底，SSE 被冻结也不会一直漏消息。
+  pollTimer = setInterval(() => { if (!document.hidden) syncNow().catch(() => {}); }, 20000);
 }
 
 /* ---------- keyboard / viewport ---------- */
@@ -1199,6 +1319,7 @@ async function boot({ keepUI } = {}) {
     if (deep) await openTask(deep);
     if (!STATIC) {
       connectSSE();
+      installLifecycleSync();
       if ('serviceWorker' in navigator) {
         if (pushSupported()) {
           navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -1248,8 +1369,45 @@ function bindUI() {
 
   // board card click
   $('#board').addEventListener('click', e => {
+    const q = e.target.closest('[data-quote]');
+    if (q) { quoteTask(q.dataset.quote); return; }
     const card = e.target.closest('.card');
     if (card) openTask(card.dataset.id);
+  });
+  $('#archiveList').addEventListener('click', e => {
+    const restore = e.target.closest('[data-restore]');
+    if (restore) { moveTask(restore.dataset.restore, 'done', '已恢复到已完成'); return; }
+    const del = e.target.closest('[data-delete]');
+    if (del) deleteTask(del.dataset.delete);
+  });
+  let dragID = '';
+  $('#board').addEventListener('dragstart', e => {
+    const card = e.target.closest('.card');
+    if (!card) return;
+    dragID = card.dataset.id;
+    e.dataTransfer.setData('text/plain', dragID);
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  $('#board').addEventListener('dragover', e => {
+    const col = e.target.closest('[data-drop]');
+    if (col) { e.preventDefault(); col.classList.add('drop-target'); }
+  });
+  $('#board').addEventListener('dragleave', e => {
+    const col = e.target.closest('[data-drop]');
+    if (col && !col.contains(e.relatedTarget)) col.classList.remove('drop-target');
+  });
+  $('#board').addEventListener('drop', e => {
+    const col = e.target.closest('[data-drop]');
+    if (!col) return;
+    e.preventDefault();
+    col.classList.remove('drop-target');
+    const id = dragID || e.dataTransfer.getData('text/plain');
+    if (id) moveTask(id, col.dataset.col, col.dataset.col === 'archived' ? '已收进归档' : '已移动');
+    dragID = '';
+  });
+  $('#board').addEventListener('dragend', () => {
+    $$('.drop-target').forEach(el => el.classList.remove('drop-target'));
+    dragID = '';
   });
   $('#board').addEventListener('keydown', e => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -1269,20 +1427,22 @@ function bindUI() {
     if (back && document.contains(back)) back.focus();
   });
 
-  // timeline reply buttons
+  // 卡片详情只读：时间线里的「回复」跳回对话并引用这张卡。
   $('#d-timeline').addEventListener('click', e => {
     const btn = e.target.closest('[data-reply]');
-    if (!btn) return;
-    replyTo = Number(btn.dataset.reply);
-    updateComposeCtx();
-    const input = $('#composeInput');
-    if (input) { input.focus(); input.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+    if (!btn || !openTaskId) return;
+    quoteTask(openTaskId);
+  });
+  $('#dQuoteChat').addEventListener('click', () => {
+    if (!openTaskId) return;
+    quoteTask(openTaskId);
   });
 
   // pending decision option buttons (detail)
   $('#d-actions').addEventListener('click', e => {
     const back = e.target.closest('#dBackChat');
     if (back) { backToChat(Number(back.dataset.seq)); return; }
+    if (e.target.closest('#dArchive')) { moveTask(openTaskId, 'archived', '已收进归档'); closeSheet(); return; }
     const btn = e.target.closest('[data-answer]');
     if (btn) answerDecision(btn.dataset.answer, btn.dataset.value);
   });
@@ -1294,20 +1454,23 @@ function bindUI() {
     if (input && input.value.trim()) answerDecision(form.dataset.decision, input.value.trim());
   });
 
-  // composer
-  $('#composeCtxClear').addEventListener('click', () => { replyTo = null; updateComposeCtx(); });
-  $('#composeSend').addEventListener('click', sendReply);
-  const ci = $('#composeInput');
-  ci.addEventListener('input', () => autogrow(ci));
-  ci.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      sendReply();
-    }
-  });
-
   // inbox delegation
   $('#inbox').addEventListener('click', e => {
+    if (e.target.closest('#plusBtn')) {
+      plusOpen = !plusOpen;
+      renderPlusMenu();
+      const b = $('#plusBtn');
+      if (b) b.setAttribute('aria-expanded', plusOpen ? 'true' : 'false');
+      return;
+    }
+    const select = e.target.closest('[data-select-task]');
+    if (select) {
+      setActiveTask(select.dataset.selectTask);
+      closePlusMenu();
+      toast(`已引用 ${select.dataset.selectTask}`);
+      return;
+    }
+    if (e.target.closest('#activeTaskClear')) { setActiveTask(''); toast('已取消引用'); return; }
     const rm = e.target.closest('[data-remove-image]');
     if (rm) {
       pendingImages.splice(Number(rm.dataset.removeImage), 1);
@@ -1315,9 +1478,9 @@ function bindUI() {
       return;
     }
     const pick = e.target.closest('[data-attach]');
-    if (pick) { const f = $('#freeFile'); if (f) f.click(); return; }
+    if (pick) { closePlusMenu(); const f = $('#freeFile'); if (f) f.click(); return; }
     const snap = e.target.closest('[data-camera]');
-    if (snap) { const f = $('#freeCam'); if (f) f.click(); return; }
+    if (snap) { closePlusMenu(); const f = $('#freeCam'); if (f) f.click(); return; }
     const ans = e.target.closest('[data-answer]');
     if (ans) { answerDecision(ans.dataset.answer, ans.dataset.value); return; }
     const taskBtn = e.target.closest('[data-task]');

@@ -264,7 +264,7 @@ func cmdTask(args []string) {
 
 func cmdMove(args []string) {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: agent-board move T-1 doing|blocked|done")
+		fmt.Fprintln(os.Stderr, "usage: agent-board move T-1 todo|doing|blocked|done|archived")
 		os.Exit(2)
 	}
 	var resp map[string]any
@@ -559,6 +559,36 @@ func cmdDispatch(args []string) {
 		}
 	}
 	fmt.Printf("ok reply=%d -> %s\n", *seq, *to)
+}
+
+func cmdTaskArchive(args []string) {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "usage: agent-board task-archive T-1")
+		os.Exit(2)
+	}
+	if err := mustClient().do("PATCH", "/api/tasks/"+url.PathEscape(args[0]),
+		map[string]string{"column": "archived"}, nil); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok %s -> archived\n", args[0])
+}
+
+func cmdTaskDelete(args []string) {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "usage: agent-board task-delete T-1 --yes")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("task-delete", flag.ExitOnError)
+	yes := fs.Bool("yes", false, "confirm permanent deletion")
+	fs.Parse(args[1:])
+	if !*yes {
+		fmt.Fprintln(os.Stderr, "永久删除不可恢复，确认请加 --yes；有未结项时服务端会拒绝")
+		os.Exit(2)
+	}
+	if err := mustClient().do("DELETE", "/api/tasks/"+url.PathEscape(args[0])+"?confirm=yes", nil, nil); err != nil {
+		fail(err)
+	}
+	fmt.Printf("ok deleted %s（编号不变，事件保留审计）\n", args[0])
 }
 
 func cmdBoardLifecycle(args []string, mode string) {

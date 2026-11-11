@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io/fs"
@@ -92,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks", s.authed(s.handleTaskCreate))
 	mux.HandleFunc("GET /api/tasks/{id}", s.authed(s.handleTaskGet))
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.authed(s.handleTaskMove))
+	mux.HandleFunc("DELETE /api/tasks/{id}", s.authed(s.handleTaskDelete))
 	mux.HandleFunc("POST /api/tasks/{id}/events", s.authed(s.handleEventCreate))
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.authed(s.handleTaskEvents))
 
@@ -390,7 +392,7 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 // ---- tasks ----
 
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.store.ListTasks()
+	tasks, err := s.store.ListTasks(r.URL.Query().Get("view") == "archived")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -469,6 +471,33 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		s.notify("done", t.ID, t.Title)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"task": t})
+}
+
+func (s *Server) handleTaskDelete(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("confirm") != "yes" {
+		writeErr(w, http.StatusBadRequest, "删除要二次确认：confirm=yes")
+		return
+	}
+	id := r.PathValue("id")
+	if _, _, err := s.store.GetTask(id); err == ErrNotFound {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
+	err := s.store.DeleteTask(id)
+	if err == ErrNotFound {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
+	var open *OpenItemError
+	if errors.As(err, &open) {
+		writeErr(w, http.StatusConflict, "不能删除："+open.Reason)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
 
 var allowedEventKinds = map[string]bool{
@@ -661,7 +690,7 @@ func (s *Server) handleReplies(w http.ResponseWriter, r *http.Request) {
 // GET /api/chat 返回自由对话（含挂靠的卡片），按新到旧。
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("recent"))
-	msgs, err := s.store.ChatMessages(limit)
+	msgs, err := s.store.ChatMessagesWithLinked(limit)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -829,6 +858,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Accel-Buffering", "no")
 
 	last, _ := s.store.LatestSeq()
+	// 重连时浏览器给 Last-Event-ID，或前端显式传 since；从断点补发漏掉的事件。
+	if since, err := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64); err == nil && since > 0 && since < last {
+		last = since
+	}
+	if since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64); err == nil && since > 0 && since < last {
+		last = since
+	}
 	fmt.Fprintf(w, "event: hello\ndata: {\"seq\":%d}\n\n", last)
 	fl.Flush()
 
@@ -850,9 +886,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if cur > last {
-				fmt.Fprintf(w, "event: change\ndata: {\"seq\":%d}\n\n", cur)
+				evs, err := s.store.EventsAfter(last, 100)
+				if err != nil {
+					return
+				}
+				for _, ev := range evs {
+					payload, _ := json.Marshal(map[string]any{"seq": ev.Seq, "type": ev.Type,
+						"task_id": ev.TaskID, "body": ev.Body, "kind": ev.Kind})
+					fmt.Fprintf(w, "id: %d\nevent: change\ndata: %s\n\n", ev.Seq, payload)
+				}
+				if len(evs) == 100 && evs[len(evs)-1].Seq > last {
+					last = evs[len(evs)-1].Seq
+				} else {
+					last = cur
+				}
 				fl.Flush()
-				last = cur
+			}
+			if r.URL.Query().Get("once") == "1" {
+				return
 			}
 		}
 	}
@@ -865,8 +916,9 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.store.db.Query(`
 		SELECT date(created_at,'localtime') AS d, COUNT(*)
-		FROM events
+		FROM events e
 		WHERE date(created_at,'localtime') >= date('now','localtime',?)
+		AND (e.task_id IS NULL OR e.task_id='' OR e.task_id NOT IN (SELECT id FROM tasks WHERE column_name='archived'))
 		GROUP BY d ORDER BY d`, fmt.Sprintf("-%d days", days-1))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

@@ -43,6 +43,7 @@
   <nav class="tabs" role="tablist" aria-label="视图">
     <button class="tab" role="tab" data-view="inbox">对话</button>
     <button class="tab" role="tab" data-view="board">看板</button>
+    <button class="tab" role="tab" data-view="archive">归档</button>
     <button class="tab" role="tab" data-view="calendar">日历</button>
   </nav>
 
@@ -81,6 +82,17 @@
       <div class="pb-list" id="pendingList" hidden></div>
     </div>
     <div class="inbox" id="inbox"></div>
+  </section>
+
+  <section class="view" id="view-archive" role="tabpanel" aria-label="归档" hidden>
+    <div class="page-head">
+      <div>
+        <h1>归档</h1>
+        <p class="page-sub">收起来的旧事，可恢复或永久删除</p>
+      </div>
+      <span class="count-pill" id="archiveCount">0</span>
+    </div>
+    <div class="archive-list" id="archiveList"></div>
   </section>
 
   <section class="view" id="view-calendar" role="tabpanel" aria-label="日历" hidden>
@@ -148,18 +160,8 @@
     <h3 class="section-title">时间线</h3>
     <ol class="timeline" id="d-timeline"></ol>
   </div>
-  <div class="sheet-compose">
-    <div class="compose-ctx" id="composeCtx" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 9V5l-7 7 7 7v-4c5 0 8 1.6 10 5-1-5-4-9-10-11z"/></svg>
-      <span id="composeCtxLabel"></span>
-      <button type="button" id="composeCtxClear" aria-label="取消引用">×</button>
-    </div>
-    <div class="compose-row">
-      <textarea id="composeInput" rows="1" placeholder="回复这张卡…" enterkeyhint="send" aria-label="回复"></textarea>
-      <button class="send-btn" id="composeSend" aria-label="发送">
-        <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
-      </button>
-    </div>
+  <div class="sheet-foot">
+    <button class="btn ghost" id="dQuoteChat">回到对话并引用</button>
   </div>
 </dialog>
 

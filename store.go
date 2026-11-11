@@ -14,7 +14,7 @@ import (
 
 var (
 	ErrNotFound = errors.New("not found")
-	columns     = map[string]bool{"todo": true, "doing": true, "blocked": true, "done": true}
+	columns     = map[string]bool{"todo": true, "doing": true, "blocked": true, "done": true, "archived": true}
 )
 
 type Event struct {
@@ -399,7 +399,7 @@ func (s *Store) CreateTask(title, project, agent, column, key string) (Task, err
 		column = "todo"
 	}
 	if !columns[column] {
-		return Task{}, fmt.Errorf("invalid column %q (todo/doing/blocked/done)", column)
+		return Task{}, fmt.Errorf("invalid column %q (todo/doing/blocked/done/archived)", column)
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -532,7 +532,9 @@ func (s *Store) ChatMessages(limit int) ([]Event, error) {
 	}
 	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
 		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
-		FROM events WHERE chat=1 ORDER BY seq DESC LIMIT ?`, limit)
+		FROM events WHERE chat=1
+		AND (COALESCE(link_task,'')='' OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=events.link_task AND t.column_name='archived'))
+		ORDER BY seq DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -540,9 +542,37 @@ func (s *Store) ChatMessages(limit int) ([]Event, error) {
 	return scanEvents(rows)
 }
 
+func (s *Store) ChatMessagesWithLinked(limit int) ([]Event, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	// 历史卡片消息（chat=0 的 user_reply）也算对话，避免卡片里发过的话成为孤岛。
+	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
+		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
+		FROM events e
+		WHERE (chat=1 OR kind IN ('user_reply','user_reaction'))
+		AND (NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=COALESCE(NULLIF(e.link_task,''),e.task_id) AND t.column_name='archived'))
+		ORDER BY seq DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanEvents(rows)
+	if err != nil {
+		return nil, err
+	}
+	// 卡片时间线里的用户消息统一挂到卡片，让对话里能点回去。
+	for i := range out {
+		if !out[i].Chat && out[i].LinkTask == "" {
+			out[i].LinkTask = out[i].TaskID
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) MoveTask(taskID, column, key string) (Task, error) {
 	if !columns[column] {
-		return Task{}, fmt.Errorf("invalid column %q (todo/doing/blocked/done)", column)
+		return Task{}, fmt.Errorf("invalid column %q (todo/doing/blocked/done/archived)", column)
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -575,13 +605,17 @@ func (s *Store) MoveTask(taskID, column, key string) (Task, error) {
 	return t, nil
 }
 
-func (s *Store) ListTasks() ([]Task, error) {
+func (s *Store) ListTasks(archived bool) ([]Task, error) {
 	s.SweepReplies()
+	where := `t.column_name<>'archived'`
+	if archived {
+		where = `t.column_name='archived'`
+	}
 	rows, err := s.db.Query(`
 		SELECT t.id,t.title,COALESCE(t.project,''),COALESCE(t.agent,''),t.column_name,
 		       t.created_at,t.updated_at,t.last_seq,
 		       (SELECT COUNT(*) FROM decisions d WHERE d.task_id=t.id AND d.status='pending')
-		FROM tasks t
+		FROM tasks t WHERE ` + where + `
 		ORDER BY CASE t.column_name WHEN 'todo' THEN 0 WHEN 'doing' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END,
 		         t.updated_at DESC`)
 	if err != nil {
@@ -683,6 +717,60 @@ func (s *Store) LatestSeq() (int64, error) {
 	return seq, err
 }
 
+func (s *Store) DeleteTask(taskID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var reason string
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM decisions WHERE task_id=? AND status='pending'`, taskID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		reason = "还有 " + strconv.Itoa(n) + " 项没拍板"
+	}
+	if reason == "" {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM replies WHERE task_id=? AND status IN ('received','processing','failed','timeout')`, taskID).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			reason = "还有 " + strconv.Itoa(n) + " 条未结回执"
+		}
+	}
+	if reason == "" {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE id=? AND column_name<>'archived' AND column_name<>'done'`, taskID).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			reason = "任务还没收尾，先归档或交付"
+		}
+	}
+	if reason != "" {
+		return &OpenItemError{Reason: reason}
+	}
+	// 事件只留审计，从卡片时间线摘链；卡本身和它的待拍板/回执一起删掉。
+	// 编号不动：meta 里的 task_seq / decision_seq 不清。
+	if _, err := tx.Exec(`UPDATE events SET task_id=NULL, link_task=NULL WHERE task_id=? OR link_task=?`, taskID, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM decisions WHERE task_id=?`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM replies WHERE task_id=?`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM tasks WHERE id=?`, taskID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type OpenItemError struct{ Reason string }
+
+func (e *OpenItemError) Error() string { return e.Reason }
+
 func (s *Store) CreateDecision(taskID, question, optionsJSON, key string) (Decision, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -779,8 +867,9 @@ func (s *Store) ListDecisions(status string, limit int) ([]Decision, error) {
 		limit = 200
 	}
 	rows, err := s.db.Query(`SELECT id,task_id,question,COALESCE(options,''),status,COALESCE(answer,''),
-		created_at,COALESCE(answered_at,'') FROM decisions
+		created_at,COALESCE(answered_at,'') FROM decisions d
 		WHERE (?='' OR status=?)
+		AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND t.column_name='archived')
 		ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC LIMIT ?`,
 		status, status, limit)
 	if err != nil {
@@ -912,9 +1001,10 @@ func (s *Store) RecentReplies(limit int, freeOnly bool) ([]Reply, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 30
 	}
-	q := `SELECT ` + replyCols + ` FROM replies`
+	q := `SELECT ` + replyCols + ` FROM replies r WHERE
+		(COALESCE(r.task_id,'')='' OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=r.task_id AND t.column_name='archived'))`
 	if freeOnly {
-		q += ` WHERE COALESCE(task_id,'')=''`
+		q += ` AND COALESCE(task_id,'')=''`
 	}
 	q += ` ORDER BY seq DESC LIMIT ?`
 	rows, err := s.db.Query(q, limit)

@@ -238,7 +238,9 @@ func usage() {
   agent-board task new --title "..." [--project ...] [--agent ...] [--column todo]
   agent-board task list [--json]
   agent-board task show T-1
-  agent-board move T-1 doing|blocked|done|todo
+  agent-board move T-1 todo|doing|blocked|done|archived
+  agent-board task-archive T-1          # 收进归档，编号不变
+  agent-board task-delete T-1 --yes     # 永久删除，未结项会拒绝
   agent-board progress T-1 "一行进展" [--agent ...]
   agent-board note T-1 "备注" [--agent ...] [--session ...]
   agent-board done T-1 --text "结论"
@@ -303,6 +305,10 @@ func main() {
 		cmdBoardLifecycle(os.Args[2:], "reset")
 	case "archive":
 		cmdBoardLifecycle(os.Args[2:], "archive")
+	case "task-archive":
+		cmdTaskArchive(os.Args[2:])
+	case "task-delete":
+		cmdTaskDelete(os.Args[2:])
 	case "board":
 		cmdBoard(os.Args[2:])
 	case "passwd":

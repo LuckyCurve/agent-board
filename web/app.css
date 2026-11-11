@@ -326,6 +326,28 @@ svg { display: block; }
 .col-dot.doing { background: var(--accent); }
 .col-dot.blocked { background: var(--bad); }
 .col-dot.done { background: var(--ok); }
+.col-dot.archived { background: var(--muted); }
+.column.drop-target { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: 12px; }
+.archive-list { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+.archive-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+}
+.ar-main { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ar-main b { font-weight: 600; overflow-wrap: anywhere; }
+.ar-meta { font-size: 12px; color: var(--muted); }
+.ar-actions { display: flex; gap: 6px; flex: none; }
+.btn.danger { color: var(--bad-ink); }
+@media (max-width: 720px) {
+  .archive-row { flex-direction: column; align-items: stretch; }
+  .ar-actions { justify-content: flex-end; }
+  .ar-actions .btn { min-height: 44px; }
+}
 .col-count {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -796,6 +818,15 @@ dialog.sheet:not([open]) { display: none; }
   -webkit-overflow-scrolling: touch;
   padding: 22px 22px calc(28px + env(safe-area-inset-bottom));
 }
+.sheet-foot {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 10px 18px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.sheet-foot .btn { flex: 1; min-height: 44px; }
 
 .detail-title {
   font-family: var(--font-serif);
@@ -1176,6 +1207,102 @@ dialog.sheet:not([open]) { display: none; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+/* 「+」菜单：选图、拍照、引用任务 */
+.plus-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  max-height: 44vh;
+  overflow-y: auto;
+}
+.plus-menu button {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 9px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text);
+}
+.plus-menu button:hover { background: var(--surface); }
+.pm-label {
+  padding: 6px 10px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--faint);
+}
+.pm-empty { padding: 4px 10px 8px; font-size: 12px; color: var(--faint); }
+/* 当前引用的任务 */
+.active-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 9px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 12px;
+}
+.at-open {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  color: inherit;
+}
+.at-id { font-family: var(--font-mono); font-weight: 600; flex: none; }
+.at-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.at-x {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  font-size: 16px;
+  line-height: 1;
+  color: inherit;
+}
+.at-x:hover { background: rgba(0, 0, 0, .08); }
+/* 消息里的引用块 */
+.msg-quote {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin-bottom: 5px;
+  padding: 5px 9px;
+  border-radius: 9px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+  font-size: 12px;
+  text-align: left;
+}
+.mq-id { font-family: var(--font-mono); font-weight: 600; flex: none; color: var(--muted); }
+.mq-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mq-state { flex: none; font-size: 11px; font-weight: 600; }
+.mq-state.decision { color: var(--warn-ink); }
+.mq-state.failed { color: var(--bad-ink); }
+.mq-state.done { color: var(--ok-ink); }
+.mq-state.doing { color: var(--accent-ink); }
+/* 卡片上的「引用」入口 */
+.card-quote {
+  margin-left: auto;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.card-quote:hover { color: var(--text); border-color: var(--accent); }
 .img-grid {
   display: flex;
   flex-wrap: wrap;

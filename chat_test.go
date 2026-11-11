@@ -81,3 +81,28 @@ func TestChatKeepsChronologicalOrderAndLimit(t *testing.T) {
 		t.Fatalf("chat order = %v", msgs)
 	}
 }
+
+func TestChatIncludesHistoricCardMessages(t *testing.T) {
+	e := newTestEnv(t)
+	id := e.createTask(t, "老卡片", "doing")
+	code, _, _ := e.req(t, "POST", "/api/tasks/"+id+"/events", map[string]any{
+		"kind": "user_reply", "text": "以前在卡片里发的",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("card message: %d", code)
+	}
+	code, body, _ := e.req(t, "GET", "/api/chat?recent=20", nil)
+	if code != http.StatusOK {
+		t.Fatalf("chat: %d", code)
+	}
+	var found bool
+	for _, raw := range body["messages"].([]any) {
+		m := raw.(map[string]any)
+		if m["body"] == "以前在卡片里发的" && m["link_task"] == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("historic card message missing from chat: %v", body["messages"])
+	}
+}
