@@ -20,6 +20,7 @@ type testEnv struct {
 	srv    *Server
 	ts     *httptest.Server
 	client *http.Client
+	token  string
 }
 
 func newTestServer(t *testing.T, cfg Config, passHash string) *testEnv {
@@ -34,13 +35,16 @@ func newTestServer(t *testing.T, cfg Config, passHash string) *testEnv {
 	if cfg.Addr == "" {
 		cfg.Addr = "127.0.0.1:0"
 	}
+	if cfg.Token == "" && cfg.TokenFile == "" {
+		cfg.Token = "test-token"
+	}
 	if err := st.metaSet("password_hash", passHash); err != nil {
 		t.Fatalf("seed password: %v", err)
 	}
 	s := NewServer(st, cfg)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	return &testEnv{store: st, srv: s, ts: ts}
+	return &testEnv{store: st, srv: s, ts: ts, token: cfg.Token}
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -64,6 +68,7 @@ func (e *testEnv) req(t *testing.T, method, path string, body any) (int, map[str
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("Authorization", "Bearer "+e.token)
 	resp, err := e.client.Do(req)
 	if err != nil {
 		t.Fatal(err)

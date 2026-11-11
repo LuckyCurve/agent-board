@@ -15,29 +15,33 @@ go build -o agent-board.exe .
 ./agent-board.exe serve
 ```
 
-首次启动会在 `~/.agent-board/` 生成 `board.db`（全部数据）。没有口令时会在控制台生成一个，**只显示这一次**；下次启动沿用库里存的加盐哈希。
+首次启动会在 `~/.agent-board/` 生成 `board.db`（全部数据）。同时产生两把凭据：
+
+| 凭据 | 存哪 | 怎么拿 |
+|---|---|---|
+| 网页口令 | 库里只存加盐哈希 | 首次启动控制台显示一次 |
+| Agent token | `~/.agent-board/token`（0600） | 首次启动控制台显示一次，同时写入文件 |
 
 ```bash
-# 自己指定口令（也可用 BOARD_PASSWORD）
-./agent-board.exe serve --password '你的口令'
+# 自己指定口令 / token（也可用 BOARD_PASSWORD / BOARD_TOKEN）
+./agent-board.exe serve --password '你的口令' --token '你的token'
 # 丢了口令
 ./agent-board.exe passwd --password '新口令'   # 立即生效，已有会话全部失效
+# 丢了或想换 token
+./agent-board.exe token --new                 # 立即生效，旧 token 作废
+./agent-board.exe token                       # 查看当前 token
 ```
 
 换端口/数据目录：`serve --addr 127.0.0.1:9000 --data D:/board`。
-除登录页和静态资源外，页面与接口都要求登录；登录失败每分钟最多 5 次。
+除登录页和静态资源外，页面要网页登录；所有 `/api/*` 另需 Agent token，网页登录态不能代替。登录失败每分钟最多 5 次。
 手机访问要自己把监听地址改成局域网地址，并确认只在内网暴露。
 iOS Safari / Android Chrome 打开后可「添加到主屏幕」，按独立 App 使用，支持深色模式。
 
 ## CLI
 
-CLI 先登录一次，把会话存在 `~/.agent-board/session`；也可以用 `BOARD_PASSWORD` 让每条命令自动登录。
+CLI 每次都自动读 `~/.agent-board/token`；也可以用 `BOARD_TOKEN` 指定。token 不进仓库、不写日志。
 
 ```bash
-export BOARD_PASSWORD='你的口令'
-agent-board login
-agent-board logout
-
 agent-board task new --title "把导出层改成流式写入" --project 财富 --agent "wealth 开发"
 agent-board progress T-1 "42 项单测全过，内存峰值 1.2G → 180M" --agent "wealth 开发"
 agent-board ask --task T-1 --question "Excel 导出还要保留吗？" --options "保留,只 CSV,先不做"
@@ -79,7 +83,7 @@ agent-board reset --yes     # 清空所有数据，编号回到 T-1 / D-1
 
 ## HTTP
 
-所有 `/api/*` 都要登录后的会话 cookie（`agent-board login` 或浏览器登录）。没有 Bearer token 旁路。
+所有 `/api/*` 都要 `Authorization: Bearer <Agent token>`；网页登录 cookie 不算数。SSE（`/api/stream`）因为 EventSource 不能带头，改用 `?token=`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

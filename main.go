@@ -15,7 +15,7 @@ const version = "0.1.0"
 type paths struct {
 	data           string
 	db             string
-	session        string
+	token          string
 	legacyPassword string
 }
 
@@ -41,7 +41,7 @@ func resolvePaths(dataFlag, dbFlag string) (paths, error) {
 	return paths{
 		data:           data,
 		db:             db,
-		session:        filepath.Join(data, "session"),
+		token:          filepath.Join(data, "token"),
 		legacyPassword: filepath.Join(data, "password.txt"),
 	}, nil
 }
@@ -52,6 +52,7 @@ func cmdServe(args []string) {
 	dataFlag := fs.String("data", "", "data directory (default ~/.agent-board)")
 	dbFlag := fs.String("db", "", "sqlite path (default <data>/board.db)")
 	passFlag := fs.String("password", "", "web password (default: env BOARD_PASSWORD; generated on first start)")
+	tokenFlag := fs.String("token", "", "agent token (default: env BOARD_TOKEN; generated once into <data>/token)")
 	secure := fs.Bool("secure-cookie", false, "set Secure on session cookie (behind HTTPS)")
 	fs.Parse(args)
 
@@ -76,10 +77,20 @@ func cmdServe(args []string) {
 	// 旧版本把口令明文写进文件；启动时顺手清掉。
 	os.Remove(p.legacyPassword)
 
+	tokenProvided := *tokenFlag
+	if tokenProvided == "" {
+		tokenProvided = os.Getenv("BOARD_TOKEN")
+	}
+	generatedToken, err := ensureToken(p.token, tokenProvided)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	fmt.Printf("agent-board %s\n", version)
 	fmt.Printf("  url:      http://%s\n", *addr)
 	fmt.Printf("  data:     %s\n", p.data)
 	fmt.Printf("  db:       %s\n", p.db)
+	fmt.Printf("  token:    %s\n", p.token)
 	switch {
 	case generated != "":
 		fmt.Printf("  password: 首次启动口令 %s（只显示这一次，请记下）\n", generated)
@@ -88,9 +99,17 @@ func cmdServe(args []string) {
 	default:
 		fmt.Printf("  password: 已设置\n")
 	}
+	switch {
+	case generatedToken != "":
+		fmt.Printf("  agent token: %s（只显示这一次，同时写入上面的文件）\n", generatedToken)
+	case tokenProvided != "":
+		fmt.Printf("  agent token: 已按启动参数写入文件\n")
+	default:
+		fmt.Printf("  agent token: 已从文件加载\n")
+	}
 
 	srv := NewServer(store, Config{Addr: *addr, Version: version, SecureCookie: *secure,
-		LoginDelay: 250 * time.Millisecond})
+		LoginDelay: 250 * time.Millisecond, TokenFile: p.token})
 	if err := srv.Run(); err != nil {
 		log.Fatal(err)
 	}
@@ -128,6 +147,56 @@ func ensurePassword(store *Store, provided string) (generated string, err error)
 	return generated, nil
 }
 
+// ensureToken 让 token 文件成为唯一事实源。首次启动生成并返回它一次；
+// 之后只读文件，值本身不打印、不进日志。
+func ensureToken(path, provided string) (generated string, err error) {
+	if provided != "" {
+		return "", os.WriteFile(path, []byte(provided+"\n"), 0o600)
+	}
+	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) != "" {
+		return "", nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	generated, err = randomHex(32)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(generated+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return generated, nil
+}
+
+func cmdToken(args []string) {
+	fs := flag.NewFlagSet("token", flag.ExitOnError)
+	dataFlag := fs.String("data", "", "data directory")
+	rotate := fs.Bool("new", false, "generate a new token")
+	fs.Parse(args)
+	p, err := resolvePaths(*dataFlag, "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *rotate {
+		tok, err := randomHex(32)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := os.WriteFile(p.token, []byte(tok+"\n"), 0o600); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "new token written to "+p.token)
+		fmt.Println(tok)
+		return
+	}
+	b, err := os.ReadFile(p.token)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "no token file; start `agent-board serve` once or run `agent-board token --new`")
+		os.Exit(1)
+	}
+	fmt.Print(string(b))
+}
+
 func cmdPasswd(args []string) {
 	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
 	dataFlag := fs.String("data", "", "data directory")
@@ -160,9 +229,8 @@ func cmdPasswd(args []string) {
 func usage() {
 	fmt.Print(`agent-board — 本地 Agent 任务看板
 
-  agent-board serve [--addr 127.0.0.1:8765] [--password ...]
-  agent-board login [--password ...]   # 保存会话，供 CLI / Agent 复用
-  agent-board logout
+  agent-board serve [--addr 127.0.0.1:8765] [--password ...] [--token ...]
+  agent-board token [--new]              # 查看 / 重发 Agent token
   agent-board task new --title "..." [--project ...] [--agent ...] [--column todo]
   agent-board task list [--json]
   agent-board task show T-1
@@ -185,7 +253,7 @@ func usage() {
   agent-board passwd --password NEW
   agent-board health
 
-环境变量：BOARD_URL（默认 http://127.0.0.1:8765）、BOARD_PASSWORD、BOARD_DATA
+环境变量：BOARD_URL（默认 http://127.0.0.1:8765）、BOARD_TOKEN（默认读 <data>/token）、BOARD_PASSWORD、BOARD_DATA
 `)
 }
 
@@ -235,10 +303,8 @@ func main() {
 		cmdBoard(os.Args[2:])
 	case "passwd":
 		cmdPasswd(os.Args[2:])
-	case "login":
-		cmdLogin(os.Args[2:])
-	case "logout":
-		cmdLogout(os.Args[2:])
+	case "token":
+		cmdToken(os.Args[2:])
 	case "health":
 		cmdHealth(os.Args[2:])
 	case "version":

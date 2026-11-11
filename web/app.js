@@ -93,11 +93,17 @@ function toast(msg, kind = '') {
 
 /* ---------- api ---------- */
 
+const API_TOKEN = (document.querySelector('meta[name="api-token"]') || {}).content || '';
+
+function authHeaders(extra) {
+  return Object.assign(API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {}, extra || {});
+}
+
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
     method,
     credentials: 'same-origin',
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: authHeaders(body ? { 'Content-Type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) {
@@ -687,7 +693,7 @@ function scheduleRefresh() {
 function connectSSE() {
   if (es) return;
   const live = $('#live');
-  es = new EventSource('/api/stream');
+  es = new EventSource('/api/stream?token=' + encodeURIComponent(API_TOKEN));
   es.addEventListener('hello', () => live && live.classList.remove('off'));
   es.addEventListener('change', () => {
     if (live) live.classList.remove('off');
@@ -748,7 +754,11 @@ function bindUI() {
   $('#themeToggle').addEventListener('click', toggleTheme);
   $('#logoutBtn').addEventListener('click', async () => {
     try {
-      await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+      await fetch('/api/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: authHeaders(),
+      });
     } catch (_) {}
     location.replace('/login');
   });

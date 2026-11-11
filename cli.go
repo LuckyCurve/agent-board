@@ -14,102 +14,59 @@ import (
 	"time"
 )
 
-// client 复用登录后拿到的会话 cookie；没有会话时用 BOARD_PASSWORD 自动登录一次。
+// client 每次请求都带 Agent token；token 默认从 <data>/token 读，BOARD_TOKEN 可覆盖。
 type client struct {
-	base     string
-	password string
-	cookie   string
+	base  string
+	token string
 }
 
 func newClient() (*client, error) {
 	base := strings.TrimRight(envOr("BOARD_URL", "http://127.0.0.1:8765"), "/")
-	c := &client{base: base, password: os.Getenv("BOARD_PASSWORD")}
+	token := strings.TrimSpace(os.Getenv("BOARD_TOKEN"))
+	tokenPath := ""
 	if p, err := resolvePaths("", ""); err == nil {
-		if b, err := os.ReadFile(p.session); err == nil {
-			c.cookie = strings.TrimSpace(string(b))
+		tokenPath = p.token
+		if token == "" {
+			if b, err := os.ReadFile(p.token); err == nil {
+				token = strings.TrimSpace(string(b))
+			}
 		}
 	}
-	return c, nil
+	if token == "" {
+		return nil, fmt.Errorf("no agent token: 启动一次 `agent-board serve` 生成 %s，或设置 BOARD_TOKEN", tokenPath)
+	}
+	return &client{base: base, token: token}, nil
 }
 
-func (c *client) saveSession(token string) error {
-	c.cookie = token
-	p, err := resolvePaths("", "")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(p.session, []byte(token+"\n"), 0o600)
-}
-
-func (c *client) clearSession() {
-	c.cookie = ""
-	if p, err := resolvePaths("", ""); err == nil {
-		os.Remove(p.session)
-	}
-}
-
-func (c *client) login() error {
-	if c.password == "" {
-		return errors.New("未登录：运行 agent-board login --password ... 或设置 BOARD_PASSWORD")
-	}
-	code, b, cookies, err := c.rawOnce("POST", "/api/login",
-		map[string]string{"password": c.password}, 15*time.Second)
-	if err != nil {
-		return err
-	}
-	if code != http.StatusOK {
-		return fmt.Errorf("登录失败: %s", apiError(b, code))
-	}
-	for _, ck := range cookies {
-		if ck.Name == sessionCookie && ck.Value != "" {
-			return c.saveSession(ck.Value)
-		}
-	}
-	return errors.New("登录响应没有会话 cookie")
-}
-
-func (c *client) rawOnce(method, path string, body any, timeout time.Duration) (int, []byte, []*http.Cookie, error) {
+func (c *client) rawOnce(method, path string, body any, timeout time.Duration) (int, []byte, error) {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, nil, err
+			return 0, nil, err
 		}
 		r = bytes.NewReader(b)
 	}
 	req, err := http.NewRequest(method, c.base+path, r)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.cookie != "" {
-		req.Header.Set("Cookie", sessionCookie+"="+c.cookie)
-	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
 	cl := &http.Client{Timeout: timeout}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, b, resp.Cookies(), err
+	return resp.StatusCode, b, err
 }
 
 func (c *client) raw(method, path string, body any, timeout time.Duration) (int, []byte, error) {
-	code, b, _, err := c.rawOnce(method, path, body, timeout)
-	if err != nil {
-		return 0, nil, err
-	}
-	if code != http.StatusUnauthorized || c.password == "" {
-		return code, b, nil
-	}
-	if err := c.login(); err != nil {
-		return code, b, err
-	}
-	code, b, _, err = c.rawOnce(method, path, body, timeout)
-	return code, b, err
+	return c.rawOnce(method, path, body, timeout)
 }
 
 func apiError(b []byte, code int) string {
@@ -128,7 +85,7 @@ func (c *client) do(method, path string, body, out any) error {
 		return err
 	}
 	if code == http.StatusUnauthorized {
-		return errors.New("未登录：运行 agent-board login --password ... 或设置 BOARD_PASSWORD")
+		return errors.New("token 无效：检查 BOARD_TOKEN 或 <data>/token")
 	}
 	if code >= 400 {
 		return errors.New(apiError(b, code))
@@ -146,35 +103,6 @@ func mustClient() *client {
 		os.Exit(1)
 	}
 	return c
-}
-
-func cmdLogin(args []string) {
-	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	pass := fs.String("password", "", "web password")
-	fs.Parse(args)
-	pw := *pass
-	if pw == "" {
-		pw = os.Getenv("BOARD_PASSWORD")
-	}
-	if pw == "" {
-		fmt.Fprintln(os.Stderr, "usage: agent-board login --password ...（也可用 BOARD_PASSWORD）")
-		os.Exit(2)
-	}
-	c := mustClient()
-	c.password = pw
-	if err := c.login(); err != nil {
-		fail(err)
-	}
-	fmt.Println("logged in")
-}
-
-func cmdLogout(args []string) {
-	c := mustClient()
-	if c.cookie != "" {
-		_, _, _, _ = c.rawOnce("POST", "/api/logout", nil, 15*time.Second)
-	}
-	c.clearSession()
-	fmt.Println("logged out")
 }
 
 func cmdTask(args []string) {
@@ -464,7 +392,7 @@ func cmdWatch(args []string) {
 			continue
 		}
 		if code == http.StatusUnauthorized {
-			fail(errors.New("登录已过期：运行 agent-board login --password ... 或设置 BOARD_PASSWORD"))
+			fail(errors.New("token 无效：检查 BOARD_TOKEN 或 <data>/token"))
 		}
 		if code >= 400 {
 			fmt.Fprintf(os.Stderr, "watch: http %d %s\n", code, strings.TrimSpace(string(b)))

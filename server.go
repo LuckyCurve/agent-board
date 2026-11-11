@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io/fs"
 	"log"
 	"mime"
@@ -32,6 +34,10 @@ type Config struct {
 	LoginWindow time.Duration
 	// LoginDelay 是每次失败后的固定延迟，用来抹平「出错快、成功慢」的时间差。
 	LoginDelay time.Duration
+	// Token 是 Agent / CLI 用的接口密钥；生产环境用 TokenFile 每次请求实时读取，
+	// 轮换后无需重启。两者都为空时所有接口都拒绝。
+	Token     string
+	TokenFile string
 }
 
 type Server struct {
@@ -90,12 +96,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/claim", s.authed(s.handleClaim))
 	mux.HandleFunc("POST /api/ack", s.authed(s.handleAck))
 	mux.HandleFunc("GET /api/consumer", s.authed(s.handleConsumer))
-	mux.HandleFunc("GET /api/stream", s.authed(s.handleStream))
+	mux.HandleFunc("GET /api/stream", s.authedStream(s.handleStream))
 	mux.HandleFunc("GET /api/activity", s.authed(s.handleActivity))
 
 	// 未登记的 API 也不给匿名探测的机会。
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		if !s.isAuthed(r) {
+		if !s.hasToken(r) {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -141,14 +147,63 @@ func (s *Server) sessionToken(r *http.Request) (string, bool) {
 	return c.Value, true
 }
 
-func (s *Server) isAuthed(r *http.Request) bool {
+func (s *Server) hasSession(r *http.Request) bool {
 	_, ok := s.sessionToken(r)
 	return ok
 }
 
+// apiTokenValue 每次请求都读文件，token 轮换后立即生效。
+func (s *Server) apiTokenValue() string {
+	if s.cfg.Token != "" {
+		return s.cfg.Token
+	}
+	if s.cfg.TokenFile != "" {
+		if b, err := os.ReadFile(s.cfg.TokenFile); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
+
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+}
+
+func (s *Server) validToken(token string) bool {
+	want := s.apiTokenValue()
+	if token == "" || want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
+}
+
+// hasToken 只看 Agent token，不认网页登录态。
+func (s *Server) hasToken(r *http.Request) bool {
+	return s.validToken(bearerToken(r))
+}
+
 func (s *Server) authed(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.isAuthed(r) {
+		if !s.hasToken(r) {
+			writeErr(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		fn(w, r)
+	}
+}
+
+// EventSource 不能带自定义头，只对 SSE 放宽到查询参数。
+func (s *Server) authedStream(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := bearerToken(r)
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		if !s.validToken(token) {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -236,7 +291,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if s.isAuthed(r) {
+	if s.hasSession(r) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
@@ -790,6 +845,13 @@ func (s *Server) servePage(w http.ResponseWriter, name string) {
 		http.Error(w, "404 page not found", http.StatusNotFound)
 		return
 	}
+	if name == "index.html" {
+		tag := ""
+		if tok := s.apiTokenValue(); tok != "" {
+			tag = `<meta name="api-token" content="` + html.EscapeString(tok) + `">`
+		}
+		b = []byte(strings.Replace(string(b), "<!-- api-token -->", tag, 1))
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(b)
@@ -810,7 +872,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p == "index.html" || p == "login.html" {
-		if p == "index.html" && !s.isAuthed(r) {
+		if p == "index.html" && !s.hasSession(r) {
 			s.redirectToLogin(w, r)
 			return
 		}
@@ -818,7 +880,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isStaticAsset(p) {
-		if !s.isAuthed(r) {
+		if !s.hasSession(r) {
 			s.redirectToLogin(w, r)
 			return
 		}

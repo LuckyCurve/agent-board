@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +58,7 @@ func bodyString(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
-// 未登录时，除登录页和静态资源外一律不放行；Bearer token 也不再是旁路。
+// 页面靠网页登录态；接口只认 Agent token，二者不能互相顶替。
 func TestAnonymousRequestsAreBlocked(t *testing.T) {
 	e := newTestServer(t, Config{Version: "test"}, testPassHash)
 	anon := noRedirectClient()
@@ -67,9 +70,23 @@ func TestAnonymousRequestsAreBlocked(t *testing.T) {
 		}
 	}
 
-	resp := get(t, anon, e.ts.URL+"/api/tasks", map[string]string{"Authorization": "Bearer test-token"})
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("bearer token bypass: got %d want 401", resp.StatusCode)
+	// 正确的 token 才能进；错的照样 401。
+	if got := get(t, anon, e.ts.URL+"/api/tasks", map[string]string{
+		"Authorization": "Bearer wrong"}).StatusCode; got != http.StatusUnauthorized {
+		t.Fatalf("wrong token: got %d want 401", got)
+	}
+	if got := get(t, anon, e.ts.URL+"/api/tasks", map[string]string{
+		"Authorization": "Bearer test-token"}).StatusCode; got != http.StatusOK {
+		t.Fatalf("correct token: got %d want 200", got)
+	}
+
+	// 网页登录态不能拿来调接口。
+	jar := loginWithJar(t, e.ts.URL, "test-pw")
+	if got := get(t, jar, e.ts.URL+"/api/tasks", nil).StatusCode; got != http.StatusUnauthorized {
+		t.Fatalf("cookie-only api: got %d want 401", got)
+	}
+	if got := get(t, jar, e.ts.URL+"/", nil).StatusCode; got != http.StatusOK {
+		t.Fatalf("cookie page: got %d want 200", got)
 	}
 
 	for _, p := range []string{"/", "/index.html", "/nope"} {
@@ -94,6 +111,122 @@ func TestAnonymousRequestsAreBlocked(t *testing.T) {
 	}
 	if got := get(t, anon, e.ts.URL+"/missing.css", nil).StatusCode; got != http.StatusNotFound {
 		t.Fatalf("missing asset: got %d want 404", got)
+	}
+}
+
+// 写接口、长轮询、SSE 全部只认 token；浏览器 cookie 不算数。
+func TestAgentTokenCoversWriteLongPollAndSSE(t *testing.T) {
+	e := newTestEnv(t)
+	login := loginWithJar(t, e.ts.URL, "test-pw") // 有网页登录态，但没有 token
+
+	type call struct {
+		method, path string
+		body         any
+	}
+	calls := []call{
+		{"POST", "/api/tasks", map[string]any{"title": "t"}},
+		{"GET", "/api/events?since=0&wait=0", nil},
+		{"GET", "/api/me", nil},
+	}
+	for _, c := range calls {
+		for _, tok := range []string{"", "wrong"} {
+			if got := doWithToken(t, login, c.method, e.ts.URL+c.path, c.body, tok); got != http.StatusUnauthorized {
+				t.Fatalf("%s %s token=%q: got %d want 401", c.method, c.path, tok, got)
+			}
+		}
+		if got := doWithToken(t, login, c.method, e.ts.URL+c.path, c.body, e.token); got >= 400 {
+			t.Fatalf("%s %s correct token: got %d", c.method, c.path, got)
+		}
+	}
+
+	for _, tok := range []string{"", "wrong"} {
+		if got := doWithToken(t, login, "GET", e.ts.URL+"/api/stream", nil, tok); got != http.StatusUnauthorized {
+			t.Fatalf("sse token=%q: got %d want 401", tok, got)
+		}
+	}
+	// EventSource 不能带头，SSE 允许查询参数。
+	if got := doWithToken(t, login, "GET", e.ts.URL+"/api/stream?token="+e.token, nil, ""); got != http.StatusOK {
+		t.Fatalf("sse query token: got %d want 200", got)
+	}
+}
+
+func doWithToken(t *testing.T, cl *http.Client, method, rawURL string, body any, token string) int {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = bytes.NewReader(b)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SSE 会一直挂着；拿到响应头就撤。
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestIndexInjectsTokenButLoginPageDoesNot(t *testing.T) {
+	e := newTestEnv(t)
+	page := bodyString(t, get(t, e.client, e.ts.URL+"/", nil))
+	if !strings.Contains(page, `name="api-token"`) || !strings.Contains(page, e.token) {
+		t.Fatal("authenticated index should carry the agent token for the frontend")
+	}
+	login := bodyString(t, get(t, noRedirectClient(), e.ts.URL+"/login", nil))
+	if strings.Contains(login, e.token) || strings.Contains(login, "api-token") {
+		t.Fatal("login page must not carry the agent token")
+	}
+}
+
+func TestTokenFileBootstrapAndRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	gen, err := ensureToken(path, "")
+	if err != nil || gen == "" {
+		t.Fatalf("bootstrap token: %q %v", gen, err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.TrimSpace(string(b)) != gen {
+		t.Fatal("token file does not match generated token")
+	}
+	if again, err := ensureToken(path, ""); err != nil || again != "" {
+		t.Fatalf("second start should reuse token: %q %v", again, err)
+	}
+
+	provided := filepath.Join(dir, "token2")
+	if gen, err := ensureToken(provided, "fixed-token"); err != nil || gen != "" {
+		t.Fatalf("provided token: %q %v", gen, err)
+	}
+	b, _ = os.ReadFile(provided)
+	if strings.TrimSpace(string(b)) != "fixed-token" {
+		t.Fatal("provided token not written")
+	}
+
+	// 服务每次请求都读文件，轮换后立即生效。
+	e := newTestServer(t, Config{Version: "test", TokenFile: path}, testPassHash)
+	if got := doWithToken(t, noRedirectClient(), "GET", e.ts.URL+"/api/tasks", nil, gen); got != http.StatusOK {
+		t.Fatalf("token from file: got %d", got)
+	}
+	if err := os.WriteFile(path, []byte("rotated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := doWithToken(t, noRedirectClient(), "GET", e.ts.URL+"/api/tasks", nil, gen); got != http.StatusUnauthorized {
+		t.Fatalf("old token after rotation: got %d want 401", got)
+	}
+	if got := doWithToken(t, noRedirectClient(), "GET", e.ts.URL+"/api/tasks", nil, "rotated"); got != http.StatusOK {
+		t.Fatalf("rotated token: got %d want 200", got)
 	}
 }
 
@@ -134,7 +267,7 @@ func TestLoginCookieAttributes(t *testing.T) {
 func TestWrongPasswordIsGeneric(t *testing.T) {
 	e := newTestServer(t, Config{Version: "test"}, testPassHash)
 	var first string
-	for _, pw := range []string{"", "nope", "test-pw2"} {
+	for _, pw := range []string{"", "nope", "definitely-not-the-password"} {
 		resp := postLogin(t, e, pw)
 		body := bodyString(t, resp)
 		if resp.StatusCode != http.StatusUnauthorized {
@@ -185,21 +318,26 @@ func TestLoginLimiterWindowExpires(t *testing.T) {
 func TestLogoutRevokesSession(t *testing.T) {
 	e := newTestEnv(t)
 
-	if got := get(t, e.client, e.ts.URL+"/api/me", nil).StatusCode; got != http.StatusOK {
+	if got := get(t, e.client, e.ts.URL+"/", nil).StatusCode; got != http.StatusOK {
+		t.Fatalf("page before logout: got %d", got)
+	}
+	if got := get(t, e.client, e.ts.URL+"/api/me", map[string]string{
+		"Authorization": "Bearer " + e.token}).StatusCode; got != http.StatusOK {
 		t.Fatalf("me before logout: got %d", got)
 	}
 	cookies := e.client.Jar.Cookies(mustURL(t, e.ts.URL))
-	var token string
+	var session string
 	for _, c := range cookies {
 		if c.Name == sessionCookie {
-			token = c.Value
+			session = c.Value
 		}
 	}
-	if token == "" {
+	if session == "" {
 		t.Fatal("login did not store session cookie")
 	}
 
 	req, _ := http.NewRequest("POST", e.ts.URL+"/api/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+e.token)
 	resp, err := e.client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -211,19 +349,25 @@ func TestLogoutRevokesSession(t *testing.T) {
 	if cleared := resp.Cookies(); len(cleared) == 0 || cleared[0].MaxAge >= 0 {
 		t.Fatalf("logout did not clear cookie: %v", cleared)
 	}
-	if got := get(t, e.client, e.ts.URL+"/api/me", nil).StatusCode; got != http.StatusUnauthorized {
-		t.Fatalf("me after logout: got %d want 401", got)
+	if e.store.SessionValid(session) {
+		t.Fatal("logout must revoke the server-side session")
+	}
+	noFollow := &http.Client{Jar: e.client.Jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	if got := get(t, noFollow, e.ts.URL+"/", nil).StatusCode; got != http.StatusSeeOther {
+		t.Fatalf("page after logout: got %d want 303", got)
 	}
 
-	// 服务端会话已撤销：抄下来的旧 cookie 也失效。
+	// 抄下来的旧 cookie 也失效。
 	old := noRedirectClient()
-	if got := get(t, old, e.ts.URL+"/api/me", map[string]string{
-		"Cookie": sessionCookie + "=" + token}).StatusCode; got != http.StatusUnauthorized {
-		t.Fatalf("replayed cookie: got %d want 401", got)
-	}
 	if got := get(t, old, e.ts.URL+"/", map[string]string{
-		"Cookie": sessionCookie + "=" + token}).StatusCode; got != http.StatusSeeOther {
+		"Cookie": sessionCookie + "=" + session}).StatusCode; got != http.StatusSeeOther {
 		t.Fatalf("replayed cookie page: got %d want 303", got)
+	}
+	if got := get(t, old, e.ts.URL+"/api/me", map[string]string{
+		"Cookie": sessionCookie + "=" + session}).StatusCode; got != http.StatusUnauthorized {
+		t.Fatalf("cookie-only api: got %d want 401", got)
 	}
 }
 
