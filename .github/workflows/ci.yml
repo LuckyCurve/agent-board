@@ -19,12 +19,15 @@ jobs:
       - name: web syntax
         run: |
           node --check web/app.js
+          node --check web/linkify.js
           node --check web/login.js
           node --check web/sw.js
       - name: vet
         run: go vet ./...
       - name: test
         run: go test -race ./...
+      - name: web test
+        run: node --test web/linkify.test.mjs
       - name: build
         run: go build -o agent-board .
       # 放在最后：npm ci 会拉出 node_modules，go 的 ./... 会把它当包扫进去。

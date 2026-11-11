@@ -82,6 +82,9 @@ function uid() {
   return 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2);
 }
 
+const richText = ABLinkify.richText;
+const richPreview = ABLinkify.richPreview;
+
 function trunc(s, n) {
   s = String(s || '').replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n) + '…' : s;
@@ -395,7 +398,7 @@ function lastTextOf(e) {
 
 function cardHTML(t) {
   const last = t.last_event;
-  const lastText = trunc(lastTextOf(last), 96);
+  const lastHTML = richPreview(lastTextOf(last), 96);
   const r = t.reply;
   const alert = taskAlert(t);
   const strip = r && (r.status === 'received' || r.status === 'processing')
@@ -409,7 +412,7 @@ function cardHTML(t) {
       <time class="card-time">${rel(t.updated_at)}</time>
     </div>
     <h3 class="card-title">${esc(t.title)}</h3>
-    ${lastText ? `<p class="card-last">${esc(lastText)}</p>` : ''}
+    ${lastHTML ? `<p class="card-last">${lastHTML}</p>` : ''}
     ${alertHTML}
     ${strip}
     <div class="card-meta">
@@ -513,7 +516,7 @@ function timelineHTML(events, replies) {
             </button>
           </span>
         </div>
-        <p class="tl-body">${esc(e.body)}</p>
+        <p class="tl-body">${richText(e.body)}</p>
         ${imagesHTML(e.data, 'tl-images')}
         ${quoteHTML(e, bySeq)}
         ${r ? `<div class="tl-status">${statusBadge(r)}</div>` : ''}
@@ -1081,7 +1084,7 @@ function messageHTML(m) {
   return `<li class="msg-item${agent ? ' agent' : ''}${sig && sig.kind === 'failed' ? ' danger' : ''}" data-seq="${m.seq}">
     <div class="msg-who">${esc(who)}</div>
     ${quote}
-    ${m.body ? `<div class="msg-text">${esc(m.body)}</div>` : ''}
+    ${m.body ? `<div class="msg-text">${richText(m.body)}</div>` : ''}
     ${imagesHTML(m.data)}
     ${alert}
     <div class="msg-foot"><time>${rel(m.created_at)}</time></div>
@@ -1672,6 +1675,7 @@ function bindUI() {
 
   // board card click
   $('#board').addEventListener('click', e => {
+    if (e.target.closest('.lnk')) return;  // 卡片摘要里的链接自己开新标签
     const q = e.target.closest('[data-quote]');
     if (q) { quoteTask(q.dataset.quote); return; }
     const card = e.target.closest('.card');

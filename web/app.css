@@ -1588,6 +1588,18 @@ dialog.sheet:not([open]) { display: none; }
 .msg-item.agent .msg-who { color: var(--accent); font-weight: 600; }
 .msg-item:not(.agent) .msg-who { text-align: right; }
 .msg-text { font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* 正文里的链接：点得动，看得出是链接，但不抢正文的注意力。 */
+.lnk {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  overflow-wrap: anywhere;
+}
+.lnk:hover { text-decoration-color: currentColor; }
+.lnk:focus-visible { outline-offset: 1px; border-radius: 3px; }
 .msg-foot {
   display: flex;
   align-items: center;

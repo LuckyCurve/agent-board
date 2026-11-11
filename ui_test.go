@@ -129,6 +129,29 @@ func TestAgentSwitchLivesInFilterBar(t *testing.T) {
 	}
 }
 
+// 消息正文、卡片事件、卡片摘要里的链接都要渲染成可点锚点。
+func TestBodyLinksAreAnchors(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	li := strings.Index(body, `src="/linkify.js"`)
+	app := strings.Index(body, `src="/app.js"`)
+	if li < 0 || app < 0 || li > app {
+		t.Fatal("linkify.js 要先于 app.js 加载")
+	}
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{"richText(m.body)", "richText(e.body)", "richPreview(lastTextOf(last)"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js 里 %s 没走链接渲染", want)
+		}
+	}
+	lib := getPageBody(t, e, "/linkify.js")
+	for _, want := range []string{`target="_blank"`, "noopener noreferrer", "escHTML"} {
+		if !strings.Contains(lib, want) {
+			t.Fatalf("linkify.js 缺 %s", want)
+		}
+	}
+}
+
 func TestDetailTitleIsFocusable(t *testing.T) {
 	e := newTestEnv(t)
 	body := getPageBody(t, e, "/")
