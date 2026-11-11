@@ -27,17 +27,15 @@ const STATIC = new URLSearchParams(location.search).has('static');
 let openTaskId = null;
 let detailFromSeq = null;  // 从对话点进来的消息 seq，用于返回上下文
 let detailReturnFocus = null; // 关掉详情后把焦点还给原来那张卡
-let replyTo = null;        // seq of the event being replied to
-let draftText = '';
 let freeDraft = '';
 let refreshTimer = null;
 let es = null;
 let lastEventSeq = 0;      // 本页见过的最大 seq，唤醒/重连时按它补拉
-let pollTimer = null;
 let chatPinned = true;     // 消息流是否贴着底部；用户往上翻时关闭
 let pendingOpen = false;   // 「等你决定」列表是否展开
 let flashSeq = 0;          // 刚从待拍板跳进来的消息，渲染后闪一下
 let pendingImages = [];    // 已上传、等随消息发出的图片 id
+let uploadingImages = 0;   // 正在上传的图片数：还有图没传完时不许发
 let activeTaskID = '';    // 对话里引用的任务：之后发的消息都挂到这张卡
 let plusOpen = false;
 let systemNote = '';       // /状态 等本地提示，不落库
@@ -421,8 +419,6 @@ function pendingHTML(decisions) {
 async function openTask(id, fromSeq) {
   openTaskId = id;
   detailFromSeq = fromSeq || null;
-  replyTo = null;
-  draftText = '';
   const dlg = $('#detail');
   if (!dlg.open) {
     const ae = document.activeElement;
@@ -495,8 +491,6 @@ function closeSheet() {
   if (dlg.open) dlg.close();
   openTaskId = null;
   detailFromSeq = null;
-  replyTo = null;
-  draftText = '';
   if (location.hash.includes('task=')) history.replaceState(null, '', location.pathname);
 }
 
@@ -1200,7 +1194,7 @@ function installLifecycleSync() {
   });
   window.addEventListener('focus', () => { if (!document.hidden) scheduleRefresh(); });
   // 前台每 20 秒兜底，SSE 被冻结也不会一直漏消息。
-  pollTimer = setInterval(() => { if (!document.hidden) syncNow().catch(() => {}); }, 20000);
+  setInterval(() => { if (!document.hidden) syncNow().catch(() => {}); }, 20000);
 }
 
 /* ---------- keyboard / viewport ---------- */
@@ -1440,7 +1434,6 @@ function bindUI() {
   dlg.addEventListener('close', () => {
     openTaskId = null;
     detailFromSeq = null;
-    replyTo = null;
     const back = detailReturnFocus;
     detailReturnFocus = null;
     if (back && document.contains(back)) back.focus();

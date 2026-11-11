@@ -1,0 +1,9 @@
+{
+  "name": "agent-board-web",
+  "private": true,
+  "description": "前端静态检查用的工具，不参与构建（前端直接 embed 进二进制）",
+  "devDependencies": {
+    "eslint": "^9.39.0",
+    "globals": "^15.15.0"
+  }
+}

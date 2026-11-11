@@ -12,3 +12,6 @@ data/
 demo/
 token
 password.txt
+
+# 前端静态检查的工具
+node_modules/

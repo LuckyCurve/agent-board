@@ -16,6 +16,15 @@ jobs:
           cache: true
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: web syntax
+        run: |
+          node --check web/app.js
+          node --check web/login.js
+          node --check web/sw.js
+      - name: web lint
+        run: |
+          npm ci --no-audit --no-fund
+          npx eslint web/
       - name: vet
         run: go vet ./...
       - name: test
