@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -127,47 +128,93 @@ func (s *Server) notify(kind, taskID, text string) {
 	go s.sendPush(msg)
 }
 
-// sendPush 发给所有订阅端，返回成功和失败台数。
-func (s *Server) sendPush(msg pushMessage) (sent, failed int) {
+// sendPush 发给所有订阅端，返回成功台数、失败台数和第一条失败原因。
+func (s *Server) sendPush(msg pushMessage) (sent, failed int, reason string) {
 	priv, pub, err := s.ensureVAPID()
 	if err != nil {
 		log.Printf("push: vapid: %v", err)
-		return 0, 1
+		return 0, 1, "服务器缺少推送密钥"
 	}
 	subs, err := s.store.PushSubs()
 	if err != nil {
 		log.Printf("push: subs: %v", err)
-		return 0, 0
+		return 0, 0, ""
 	}
 	if len(subs) == 0 {
-		return 0, 0
+		return 0, 0, ""
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
-		return 0, 0
+		return 0, 0, ""
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, sub := range subs {
 		resp, err := sendWebPush(client, payload, sub.Endpoint, sub.P256dh, sub.Auth, pub, priv)
 		if err != nil {
-			log.Printf("push: send: %v", err)
+			log.Printf("push: %s 发送失败: %v", pushHost(sub.Endpoint), err)
 			failed++
+			if reason == "" {
+				reason = "连不上推送服务"
+			}
 			continue
 		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-			_ = s.store.DeletePushSub(sub.Endpoint)
-			failed++
-			continue
-		}
 		if resp.StatusCode >= 300 {
+			// 推送服务会说明原因（密钥不符、订阅过期、格式不对），记进日志才查得动。
+			log.Printf("push: %s 拒绝了这条通知: status=%d body=%s",
+				pushHost(sub.Endpoint), resp.StatusCode, redactPushText(string(body)))
 			failed++
+			if reason == "" {
+				reason = pushRejectReason(resp.StatusCode)
+			}
+			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+				_ = s.store.DeletePushSub(sub.Endpoint)
+			}
 			continue
 		}
 		sent++
 	}
-	return sent, failed
+	return sent, failed, reason
 }
+
+// pushHost 只留推送服务的主机名，完整 endpoint 不进日志。
+func pushHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "push"
+	}
+	return u.Host
+}
+
+// pushRejectReason 把推送服务的状态码翻成人话。
+func pushRejectReason(code int) string {
+	switch code {
+	case http.StatusBadRequest:
+		return "推送服务说这条通知格式不对"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "推送服务不认这把通知密钥，多半是订阅已经失效：在手机上把铃铛关掉再打开，重新订阅一次"
+	case http.StatusNotFound, http.StatusGone:
+		return "这个订阅已经失效：在手机上把铃铛关掉再打开，重新订阅一次"
+	default:
+		return fmt.Sprintf("推送服务回了 %d，先在手机上重新订阅一次", code)
+	}
+}
+
+// redactPushText 把响应正文里的长串（令牌之类）打码，日志里只留人话。
+func redactPushText(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(空)"
+	}
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return longToken.ReplaceAllString(s, "…")
+}
+
+// longToken 匹配响应正文里像令牌的长串。
+var longToken = regexp.MustCompile(`[A-Za-z0-9._/-]{24,}`)
 
 // sendWebPush 按 RFC 8291 加密正文、按 VAPID 签名，POST 给推送服务。
 // 盐放 Encryption 头、服务端公钥放 Crypto-Key 头，正文只有密文——
@@ -342,14 +389,17 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	sent, failed := s.sendPush(pushMessage{
+	sent, failed, reason := s.sendPush(pushMessage{
 		Title: "Agent Board",
 		Body:  "这是一条测试通知，收到即代表手机推送可用",
 	})
 	msg := "测试通知已发出"
 	switch {
 	case sent == 0:
-		msg = "测试通知没发出去：检查设备订阅或推送服务"
+		msg = "测试通知没发出去"
+		if reason != "" {
+			msg += "：" + reason
+		}
 	case failed > 0:
 		msg = fmt.Sprintf("测试通知发出 %d 台，失败 %d 台", sent, failed)
 	}
