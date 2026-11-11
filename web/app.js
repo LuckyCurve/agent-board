@@ -15,7 +15,7 @@ const state = {
   decisions: [],
   freeReplies: [],
   activity: [],
-  view: 'board',
+  view: 'inbox',
   loaded: false,
 };
 
@@ -665,14 +665,13 @@ function renderCalendar() {
 /* ---------- views ---------- */
 
 function setView(v, fromHash) {
-  if (!['board', 'inbox', 'calendar'].includes(v)) v = 'board';
+  if (!['board', 'inbox', 'calendar'].includes(v)) v = 'inbox';
   state.view = v;
   document.body.dataset.view = v;
   if (v === 'inbox') chatPinned = true;
   if (!fromHash) {
-    const target = v === 'board' ? location.pathname : '#' + v;
-    if (v === 'board') history.replaceState(null, '', location.pathname);
-    else history.replaceState(null, '', '#' + v);
+    const target = v === 'inbox' ? location.pathname : '#' + v;
+    history.replaceState(null, '', target);
   }
   $$('.view').forEach(el => { el.hidden = el.id !== 'view-' + v; });
   $$('.tab, .bnav-item').forEach(b => {
@@ -689,8 +688,8 @@ function setView(v, fromHash) {
 
 function viewFromHash() {
   const h = location.hash.replace('#', '');
-  if (h.startsWith('task=')) return 'board';
-  return ['inbox', 'calendar'].includes(h) ? h : 'board';
+  if (h.startsWith('task=') || h === 'board') return 'board';
+  return h === 'calendar' ? 'calendar' : 'inbox';
 }
 
 function taskFromHash() {

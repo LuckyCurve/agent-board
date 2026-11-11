@@ -41,8 +41,8 @@
   </div>
 
   <nav class="tabs" role="tablist" aria-label="视图">
+    <button class="tab" role="tab" data-view="inbox">对话</button>
     <button class="tab" role="tab" data-view="board">看板</button>
-    <button class="tab" role="tab" data-view="inbox">收件箱</button>
     <button class="tab" role="tab" data-view="calendar">日历</button>
   </nav>
 
@@ -60,11 +60,11 @@
     <div class="board" id="board"></div>
   </section>
 
-  <section class="view" id="view-inbox" role="tabpanel" aria-label="收件箱" hidden>
+  <section class="view" id="view-inbox" role="tabpanel" aria-label="对话" hidden>
     <div class="page-head">
       <div>
-        <h1>收件箱</h1>
-        <p class="page-sub">需要你拍板的事项</p>
+        <h1>对话</h1>
+        <p class="page-sub">和主会话的消息，从上往下看</p>
       </div>
       <span class="count-pill" id="inboxCount">0</span>
     </div>
@@ -97,16 +97,16 @@
 </main>
 
 <nav class="bottomnav" role="tablist" aria-label="主导航">
+  <button class="bnav-item" role="tab" data-view="inbox">
+    <span class="bnav-icon">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V16A2.5 2.5 0 0 1 4 13.5z"/></svg>
+      <span class="bnav-badge" id="navBadge" hidden>0</span>
+    </span>
+    <span>对话</span>
+  </button>
   <button class="bnav-item" role="tab" data-view="board">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 5v14M12 5v9M18.5 5v12"/></svg>
     <span>看板</span>
-  </button>
-  <button class="bnav-item" role="tab" data-view="inbox">
-    <span class="bnav-icon">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7.5"/><path d="M4 13.5h4.2l1.4 2.2h4.8l1.4-2.2H20V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
-      <span class="bnav-badge" id="navBadge" hidden>0</span>
-    </span>
-    <span>收件箱</span>
   </button>
   <button class="bnav-item" role="tab" data-view="calendar">
     <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.4"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h3M13.5 13h3M7.5 16.5h3M13.5 16.5h3"/></svg>
