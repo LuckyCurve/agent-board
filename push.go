@@ -148,8 +148,9 @@ func (s *Server) sendPush(msg pushMessage) (sent, failed int, reason string) {
 		return 0, 0, ""
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
+	subject := s.vapidSubject()
 	for _, sub := range subs {
-		resp, err := sendWebPush(client, payload, sub.Endpoint, sub.P256dh, sub.Auth, pub, priv)
+		resp, err := sendWebPush(client, payload, sub.Endpoint, sub.P256dh, sub.Auth, pub, priv, subject)
 		if err != nil {
 			log.Printf("push: %s 发送失败: %v", pushHost(sub.Endpoint), err)
 			failed++
@@ -166,7 +167,7 @@ func (s *Server) sendPush(msg pushMessage) (sent, failed int, reason string) {
 				pushHost(sub.Endpoint), resp.StatusCode, redactPushText(string(body)))
 			failed++
 			if reason == "" {
-				reason = pushRejectReason(resp.StatusCode)
+				reason = pushRejectReason(resp.StatusCode, string(body))
 			}
 			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 				_ = s.store.DeletePushSub(sub.Endpoint)
@@ -188,16 +189,19 @@ func pushHost(endpoint string) string {
 }
 
 // pushRejectReason 把推送服务的状态码翻成人话。
-func pushRejectReason(code int) string {
-	switch code {
-	case http.StatusBadRequest:
-		return "推送服务说这条通知格式不对"
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return "推送服务不认这把通知密钥，多半是订阅已经失效：在手机上把铃铛关掉再打开，重新订阅一次"
-	case http.StatusNotFound, http.StatusGone:
+// 订阅失效才让用户重新订阅；服务端自己的问题别往用户手机上推。
+func pushRejectReason(code int, body string) string {
+	switch {
+	case code == http.StatusNotFound || code == http.StatusGone:
 		return "这个订阅已经失效：在手机上把铃铛关掉再打开，重新订阅一次"
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return "服务端的通知密钥有问题，不是你手机的问题，不用重新订阅"
+	case code == http.StatusBadRequest:
+		return "推送服务说这条通知格式不对，是服务端的问题，不用重新订阅"
+	case code >= 500:
+		return "推送服务暂时不可用，不是你手机的问题，过会儿再试"
 	default:
-		return fmt.Sprintf("推送服务回了 %d，先在手机上重新订阅一次", code)
+		return fmt.Sprintf("推送服务回了 %d，先不用动手机，稍后再试一次", code)
 	}
 }
 
@@ -219,12 +223,12 @@ var longToken = regexp.MustCompile(`[A-Za-z0-9._/-]{24,}`)
 // sendWebPush 按 RFC 8291 加密正文、按 VAPID 签名，POST 给推送服务。
 // 盐放 Encryption 头、服务端公钥放 Crypto-Key 头，正文只有密文——
 // Chrome（FCM）和 iOS 只认这个格式。
-func sendWebPush(client *http.Client, payload []byte, endpoint, p256dh, auth, vapidPub, vapidPriv string) (*http.Response, error) {
+func sendWebPush(client *http.Client, payload []byte, endpoint, p256dh, auth, vapidPub, vapidPriv, sub string) (*http.Response, error) {
 	body, salt, asPub, err := encryptPush(payload, p256dh, auth)
 	if err != nil {
 		return nil, err
 	}
-	header, err := vapidHeader(endpoint, vapidPub, vapidPriv, time.Now().Add(12*time.Hour))
+	header, err := vapidHeader(endpoint, vapidPub, vapidPriv, sub, time.Now().Add(12*time.Hour))
 	if err != nil {
 		return nil, err
 	}
@@ -302,8 +306,36 @@ func encryptPush(payload []byte, p256dh, auth string) (body []byte, saltB64, asP
 	return body, base64.RawURLEncoding.EncodeToString(salt), base64.RawURLEncoding.EncodeToString(asPub), nil
 }
 
+// vapidSubject 决定 VAPID 里的联系人地址：优先用配置（VAPID_SUB），
+// 其次按站点地址推一个，最后用一个一定能用的默认值。
+func (s *Server) vapidSubject() string {
+	configured := s.cfg.VapidSub
+	if configured == "" {
+		configured = envOr("VAPID_SUB", "")
+	}
+	return vapidSubject(configured, envOr("BOARD_URL", ""))
+}
+
+// vapidSubject 是推送服务里留的联系人地址。Apple 会拒掉不合法的主机名
+// （localhost 就不行），所以这里只给一个一定能用的默认值，站点再按需覆盖。
+func vapidSubject(configured, baseURL string) string {
+	s := strings.TrimSpace(configured)
+	if isVapidSubject(s) {
+		return s
+	}
+	if u, err := url.Parse(baseURL); err == nil && u.Hostname() != "" && u.Hostname() != "localhost" {
+		return "mailto:admin@" + u.Hostname()
+	}
+	return "mailto:admin@example.com"
+}
+
+// isVapidSubject 只认 mailto: 和 https: 两种形式。
+func isVapidSubject(s string) bool {
+	return strings.HasPrefix(s, "mailto:") || strings.HasPrefix(s, "https:")
+}
+
 // vapidHeader 生成 "vapid t=<jwt>, k=<公钥>"，JWT 用 ES256 签，aud 是推送服务的来源。
-func vapidHeader(endpoint, vapidPub, vapidPriv string, exp time.Time) (string, error) {
+func vapidHeader(endpoint, vapidPub, vapidPriv, sub string, exp time.Time) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return "", err
@@ -322,7 +354,7 @@ func vapidHeader(endpoint, vapidPub, vapidPriv string, exp time.Time) (string, e
 	claims := b64JSON(map[string]any{
 		"aud": u.Scheme + "://" + u.Host,
 		"exp": exp.Unix(),
-		"sub": "mailto:agent-board@localhost",
+		"sub": sub,
 	})
 	signing := head + "." + claims
 	sum := sha256.Sum256([]byte(signing))

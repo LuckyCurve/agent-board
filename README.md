@@ -45,7 +45,9 @@ go build -o agent-board.exe .
 
 手机访问要自己把监听地址改成局域网地址，并确认只在内网暴露。iOS Safari / Android Chrome 打开后可「添加到主屏幕」，按独立 App 使用，支持深色模式。
 
-顶栏铃铛启用浏览器通知：只在「等你拍板 / 完成 / 阻塞 / 失败」时推，点通知回到对应卡片，再点一次即关。浏览器只在 HTTPS 或 localhost 下开放通知，局域网 `http://IP:8765` 无法启用；iOS 还要求先「添加到主屏幕」。
+顶栏铃铛启用浏览器通知：只在「等你拍板 / 完成 / 阻塞 / 失败」时推，点通知回到对应卡片，再点一次即关。浏览器只在 HTTPS 或 localhost 下开放通知，局域网 `http://IP:8765` 无法启用；iOS 还要求先「添加到主屏幕」。铃铛旁的纸飞机按钮会发一条测试通知，用它确认手机收不收得到。
+
+推送服务要求留一个像样的联系人地址（`mailto:` 或 `https:` 开头，`localhost` 这类主机名会被 Apple 拒掉）：设 `VAPID_SUB=mailto:admin@你的域名` 或启动时加 `--vapid-sub`。不设时按 `BOARD_URL` 的域名推一个，再不济用 `mailto:admin@example.com`。
 
 图片：网页里可点选、粘贴、拍照上传，缩略图点开看大图；CLI 的 `message / progress / note / event` 都支持 `--image`，可重复写。图片存 `<data>/images/`，只收 PNG / JPG / WebP，单张 ≤5MB、每条 ≤6 张；按魔数识别，不认扩展名。启动时清掉 30 天前的旧图。
 

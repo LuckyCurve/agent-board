@@ -46,6 +46,8 @@ type Config struct {
 	ImageMaxBytes int64
 	// DeployTrigger 是「立即更新」的触发文件路径；留空表示本机不提供这个功能。
 	DeployTrigger string
+	// VapidSub 是推送服务里的联系人地址（mailto: 或 https: 开头）；留空用默认。
+	VapidSub string
 }
 
 type Server struct {
