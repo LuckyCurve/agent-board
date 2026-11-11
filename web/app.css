@@ -1672,6 +1672,8 @@ dialog.sheet:not([open]) { display: none; }
   .tabs { display: none; }
   .live-text { display: none; }
   .live { padding: 0 9px; }
+  /* 手机上顶栏只留 logo，腾出位置给通知相关的按钮。 */
+  .brand-name { display: none; }
 
   .bottomnav {
     display: grid;

@@ -1217,6 +1217,8 @@ function installViewport() {
 /* ---------- push ---------- */
 
 let pushEnabled = false;
+let pushDevices = 0;
+let pushMsg = '';
 
 function pushSupported() {
   // 浏览器只在 HTTPS / localhost 开放通知；不支持时压根别把铃铛摆出来。
@@ -1233,16 +1235,40 @@ function updatePushButton() {
   btn.setAttribute('aria-pressed', pushEnabled ? 'true' : 'false');
   const label = pushEnabled ? '关闭通知' : '开启通知';
   btn.setAttribute('aria-label', label);
-  btn.title = label;
+  btn.title = pushMsg || label;
+  const test = $('#pushTest');
+  if (test) {
+    test.title = pushDevices
+      ? `发一条测试通知（${pushDevices} 台设备）`
+      : '发一条测试通知（还没有设备订阅）';
+  }
 }
 
 async function syncPushStatus() {
-  if (STATIC || !pushSupported()) return;
+  if (STATIC) return;
   try {
     const st = await api('/api/push/status');
     pushEnabled = !!st.enabled;
+    pushDevices = st.devices || 0;
+    pushMsg = st.message || '';
     updatePushButton();
   } catch (_) {}
+}
+
+// 用户自己点一下就能知道手机收不收得到。
+async function sendTestPush() {
+  const btn = $('#pushTest');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api('/api/push/test', { method: 'POST' });
+    pushDevices = res.devices || 0;
+    updatePushButton();
+    toast(res.message || '测试通知已发出');
+  } catch (e) {
+    toast('测试通知没发出去：' + e.message, 'bad');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function urlBase64ToUint8Array(base64) {
@@ -1271,6 +1297,7 @@ async function enablePush() {
   await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
   pushEnabled = true;
   updatePushButton();
+  syncPushStatus();
   toast('已开启通知：等你拍板、完成、阻塞时提醒');
 }
 
@@ -1281,6 +1308,7 @@ async function disablePush() {
   await api('/api/push/unsubscribe', { method: 'POST' });
   pushEnabled = false;
   updatePushButton();
+  syncPushStatus();
   toast('已关闭通知');
 }
 
@@ -1333,6 +1361,7 @@ function bindUI() {
 
   $('#themeToggle').addEventListener('click', toggleTheme);
   $('#pushToggle').addEventListener('click', togglePush);
+  $('#pushTest').addEventListener('click', sendTestPush);
   updatePushButton();
   $('#pendingToggle').addEventListener('click', () => {
     pendingOpen = !pendingOpen;

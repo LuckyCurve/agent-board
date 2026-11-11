@@ -108,7 +108,57 @@ func TestPushChainDeliversSignedEncryptedNotification(t *testing.T) {
 	}
 }
 
-// decryptPush 站在浏览器/service worker 那头解密：盐在头里，公钥也在头里。
+// 用户自己点一下就能确认手机收不收得到。
+func TestPushTestEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+
+	// 没有订阅时不报错，告诉用户还没设备。
+	code, body, _ := e.req(t, "POST", "/api/push/test", nil)
+	if code != http.StatusOK {
+		t.Fatalf("无订阅时 /api/push/test: %d %v", code, body)
+	}
+	if body["devices"] != float64(0) {
+		t.Fatalf("devices = %v, want 0", body["devices"])
+	}
+	if body["message"] == "" {
+		t.Fatal("应该给用户一句人话")
+	}
+
+	// 要 token。
+	code = doWithToken(t, e.client, "POST", e.ts.URL+"/api/push/test", nil, "")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("匿名调用: %d, want 401", code)
+	}
+
+	// 有订阅时统计发出几台。
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p256dh := base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
+	authRaw := make([]byte, 16)
+	if _, err := rand.Read(authRaw); err != nil {
+		t.Fatal(err)
+	}
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer fake.Close()
+	if err := e.store.SavePushSub(fake.URL, p256dh, base64.RawURLEncoding.EncodeToString(authRaw)); err != nil {
+		t.Fatal(err)
+	}
+	code, body, _ = e.req(t, "POST", "/api/push/test", nil)
+	if code != http.StatusOK {
+		t.Fatalf("/api/push/test: %d %v", code, body)
+	}
+	if body["devices"] != float64(1) {
+		t.Fatalf("devices = %v, want 1", body["devices"])
+	}
+	if body["sent"] != float64(1) {
+		t.Fatalf("sent = %v, want 1（%v）", body["sent"], body)
+	}
+}
 func decryptPush(priv *ecdh.PrivateKey, authSecret []byte, h http.Header, body []byte) ([]byte, error) {
 	saltB64 := strings.TrimPrefix(h.Get("Encryption"), "salt=")
 	salt, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(saltB64, "="))

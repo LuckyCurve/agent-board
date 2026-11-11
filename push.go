@@ -127,36 +127,46 @@ func (s *Server) notify(kind, taskID, text string) {
 	go s.sendPush(msg)
 }
 
-func (s *Server) sendPush(msg pushMessage) {
+// sendPush 发给所有订阅端，返回成功和失败台数。
+func (s *Server) sendPush(msg pushMessage) (sent, failed int) {
 	priv, pub, err := s.ensureVAPID()
 	if err != nil {
 		log.Printf("push: vapid: %v", err)
-		return
+		return 0, 1
 	}
 	subs, err := s.store.PushSubs()
 	if err != nil {
 		log.Printf("push: subs: %v", err)
-		return
+		return 0, 0
 	}
 	if len(subs) == 0 {
-		return
+		return 0, 0
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
-		return
+		return 0, 0
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, sub := range subs {
 		resp, err := sendWebPush(client, payload, sub.Endpoint, sub.P256dh, sub.Auth, pub, priv)
 		if err != nil {
 			log.Printf("push: send: %v", err)
+			failed++
 			continue
 		}
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 			_ = s.store.DeletePushSub(sub.Endpoint)
+			failed++
+			continue
 		}
+		if resp.StatusCode >= 300 {
+			failed++
+			continue
+		}
+		sent++
 	}
+	return sent, failed
 }
 
 // sendWebPush 按 RFC 8291 加密正文、按 VAPID 签名，POST 给推送服务。
@@ -311,7 +321,41 @@ func (s *Server) handlePushStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": n > 0, "devices": n})
+	msg := "还没有设备订阅通知：在手机上点铃铛开启"
+	if n > 0 {
+		msg = fmt.Sprintf("%d 台设备已订阅通知", n)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": n > 0, "devices": n, "message": msg})
+}
+
+// POST /api/push/test 给所有订阅设备发一条固定文案，让用户自己确认手机收不收得到。
+func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
+	n, err := s.store.PushSubCount()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"devices": 0, "sent": 0, "failed": 0,
+			"message": "还没有设备订阅通知：先在手机上点铃铛开启",
+		})
+		return
+	}
+	sent, failed := s.sendPush(pushMessage{
+		Title: "Agent Board",
+		Body:  "这是一条测试通知，收到即代表手机推送可用",
+	})
+	msg := "测试通知已发出"
+	switch {
+	case sent == 0:
+		msg = "测试通知没发出去：检查设备订阅或推送服务"
+	case failed > 0:
+		msg = fmt.Sprintf("测试通知发出 %d 台，失败 %d 台", sent, failed)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"devices": n, "sent": sent, "failed": failed, "message": msg,
+	})
 }
 
 func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {

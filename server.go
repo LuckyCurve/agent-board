@@ -111,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /images/{name}", s.authedMedia(s.handleImageGet))
 	mux.HandleFunc("GET /api/push/key", s.authed(s.handlePushKey))
 	mux.HandleFunc("GET /api/push/status", s.authed(s.handlePushStatus))
+	mux.HandleFunc("POST /api/push/test", s.authed(s.handlePushTest))
 	mux.HandleFunc("POST /api/push/subscribe", s.authed(s.handlePushSubscribe))
 	mux.HandleFunc("POST /api/push/unsubscribe", s.authed(s.handlePushUnsubscribe))
 	mux.HandleFunc("POST /api/deploy", s.authed(s.handleDeploy))
