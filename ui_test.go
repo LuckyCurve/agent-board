@@ -39,3 +39,22 @@ func TestChatIsTheFirstTab(t *testing.T) {
 		t.Fatal("chat page should be titled 对话")
 	}
 }
+
+func TestInboxHasPinnedPendingBar(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	bar := strings.Index(body, `id="pendingBar"`)
+	inbox := strings.Index(body, `class="inbox" id="inbox"`)
+	if bar < 0 {
+		t.Fatal("inbox should have a pending bar")
+	}
+	if inbox < 0 || bar > inbox {
+		t.Fatal("pending bar should sit above the scrollable inbox, so it stays visible")
+	}
+	if !strings.Contains(body, "等你决定") {
+		t.Fatal("pending bar should say 等你决定")
+	}
+	if !strings.Contains(body, `class="pending-bar" id="pendingBar" hidden`) {
+		t.Fatal("pending bar should start hidden until there is something to decide")
+	}
+}

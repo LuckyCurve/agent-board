@@ -71,6 +71,15 @@
       </div>
       <span class="count-pill" id="inboxCount">0</span>
     </div>
+    <div class="pending-bar" id="pendingBar" hidden>
+      <button class="pb-toggle" id="pendingToggle" aria-expanded="false" aria-controls="pendingList">
+        <span class="pb-dot" aria-hidden="true"></span>
+        <span class="pb-text">等你决定</span>
+        <span class="pb-count" id="pendingCount">0</span>
+        <svg class="pb-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="pb-list" id="pendingList" hidden></div>
+    </div>
     <div class="inbox" id="inbox"></div>
   </section>
 

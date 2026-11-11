@@ -30,6 +30,8 @@ let freeDraft = '';
 let refreshTimer = null;
 let es = null;
 let chatPinned = true;     // 消息流是否贴着底部；用户往上翻时关闭
+let pendingOpen = false;   // 「等你决定」列表是否展开
+let flashSeq = 0;          // 刚从待拍板跳进来的消息，渲染后闪一下
 let systemNote = '';       // /状态 等本地提示，不落库
 
 function chatNearBottom(el) {
@@ -705,9 +707,64 @@ function messageHTML(m) {
   </li>`;
 }
 
+// 待拍板常驻条：在消息区外面，滚动不会把它带走；没事时整条隐藏。
+function renderPendingBar() {
+  const bar = $('#pendingBar');
+  if (!bar) return;
+  const pending = state.decisions;
+  bar.hidden = pending.length === 0;
+  if (!pending.length) {
+    pendingOpen = false;
+  }
+  const count = $('#pendingCount');
+  if (count) count.textContent = String(pending.length);
+  const toggle = $('#pendingToggle');
+  if (toggle) toggle.setAttribute('aria-expanded', pendingOpen ? 'true' : 'false');
+  const list = $('#pendingList');
+  if (list) {
+    list.hidden = !pendingOpen;
+    list.innerHTML = pending.map(d => {
+      const t = taskById(d.task_id);
+      const msg = state.chat.find(m => m.link_task === d.task_id);
+      const source = t ? `${d.task_id} · ${t.title}` : (d.task_id || '主会话');
+      const seq = msg ? ` data-seq="${msg.seq}"` : '';
+      return `<button class="pb-row" data-task="${esc(d.task_id)}"${seq}>
+        <span class="pb-row-main">
+          <span class="pb-row-q">${esc(d.question)}</span>
+          <span class="pb-row-meta">${esc(source)} · ${esc(rel(d.created_at))}</span>
+        </span>
+        <svg class="pb-row-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+      </button>`;
+    }).join('');
+  }
+}
+
+function closePendingBar() {
+  pendingOpen = false;
+  const toggle = $('#pendingToggle');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  const list = $('#pendingList');
+  if (list) list.hidden = true;
+}
+
+// 能回到那条对话就回对话并高亮，找不到对应消息就打开卡片。
+function jumpFromPending(taskId, seq) {
+  closePendingBar();
+  const msg = seq ? state.chat.find(m => m.seq === seq) : state.chat.find(m => m.link_task === taskId);
+  if (!msg) {
+    openTask(taskId);
+    return;
+  }
+  chatPinned = false;
+  flashSeq = msg.seq;
+  if (state.view !== 'inbox') setView('inbox');
+  else renderInbox();
+}
+
 function renderInbox() {
   const el = $('#inbox');
   if (!el) return;
+  renderPendingBar();
   const oldScroll = $('#inboxScroll');
   const oldTop = oldScroll ? oldScroll.scrollTop : 0;
   const freeInput = $('#freeInput');
@@ -748,6 +805,14 @@ function renderInbox() {
     sc.addEventListener('scroll', () => { chatPinned = chatNearBottom(sc); }, { passive: true });
     // 默认贴底；用户翻历史时保留原来的位置，不被新消息拽走。
     requestAnimationFrame(() => {
+      const target = flashSeq ? sc.querySelector(`.msg-item[data-seq="${flashSeq}"]`) : null;
+      if (target) {
+        target.scrollIntoView({ block: 'center' });
+        target.classList.add('flash');
+        setTimeout(() => target.classList.remove('flash'), 1600);
+        flashSeq = 0;
+        return;
+      }
       if (chatPinned) sc.scrollTop = sc.scrollHeight;
       else sc.scrollTop = oldTop;
     });
@@ -1045,6 +1110,15 @@ function bindUI() {
   $('#themeToggle').addEventListener('click', toggleTheme);
   $('#pushToggle').addEventListener('click', togglePush);
   updatePushButton();
+  $('#pendingToggle').addEventListener('click', () => {
+    pendingOpen = !pendingOpen;
+    renderPendingBar();
+  });
+  $('#pendingList').addEventListener('click', e => {
+    const row = e.target.closest('.pb-row');
+    if (!row) return;
+    jumpFromPending(row.dataset.task, Number(row.dataset.seq) || 0);
+  });
   $('#logoutBtn').addEventListener('click', async () => {
     try {
       await fetch('/api/logout', {
