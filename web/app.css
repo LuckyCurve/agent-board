@@ -140,6 +140,10 @@ svg { display: block; }
   outline-offset: 2px;
   border-radius: 6px;
 }
+/* 鼠标/触屏点开详情时不画焦点环；键盘 Tab 进来仍然靠 :focus-visible 画。 */
+#d-title:focus:not(:focus-visible),
+.card:focus:not(:focus-visible),
+.icon-btn:focus:not(:focus-visible) { outline: none; }
 
 ::selection { background: var(--accent-soft); }
 

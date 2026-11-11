@@ -24,6 +24,7 @@ const STATIC = new URLSearchParams(location.search).has('static');
 
 let openTaskId = null;
 let detailFromSeq = null;  // 从对话点进来的消息 seq，用于返回上下文
+let detailReturnFocus = null; // 关掉详情后把焦点还给原来那张卡
 let replyTo = null;        // seq of the event being replied to
 let draftText = '';
 let freeDraft = '';
@@ -366,8 +367,15 @@ async function openTask(id, fromSeq) {
   replyTo = null;
   draftText = '';
   const dlg = $('#detail');
-  if (!dlg.open) dlg.showModal();
+  if (!dlg.open) {
+    const ae = document.activeElement;
+    detailReturnFocus = ae && ae.closest && ae.closest('.card') ? ae : null;
+    dlg.showModal();
+  }
   await refreshDetail(id, false);
+  // 打开时焦点落在标题上，键盘用户 Tab 才进返回/操作按钮。
+  const title = $('#d-title');
+  if (title) title.focus({ preventScroll: true });
   // 默认从标题看起；#task=T-1&bottom=1 直接落到底部的回复状态（深链/截图用）。
   const body = $('#sheetBody');
   if (body) body.scrollTop = location.hash.includes('bottom=1') ? body.scrollHeight : 0;
@@ -1097,12 +1105,15 @@ function installViewport() {
 let pushEnabled = false;
 
 function pushSupported() {
-  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  // 浏览器只在 HTTPS / localhost 开放通知；不支持时压根别把铃铛摆出来。
+  return window.isSecureContext && 'serviceWorker' in navigator &&
+    'PushManager' in window && 'Notification' in window;
 }
 
 function updatePushButton() {
   const btn = $('#pushToggle');
   if (!btn) return;
+  btn.hidden = !pushSupported();
   btn.classList.toggle('push-on', pushEnabled);
   btn.classList.toggle('push-off', !pushEnabled);
   btn.setAttribute('aria-pressed', pushEnabled ? 'true' : 'false');
@@ -1160,14 +1171,7 @@ async function disablePush() {
 }
 
 async function togglePush() {
-  if (!window.isSecureContext) {
-    toast('通知需要 HTTPS 或 localhost 访问，当前地址浏览器不开放通知');
-    return;
-  }
-  if (!pushSupported()) {
-    toast('这个浏览器不支持通知');
-    return;
-  }
+  if (!pushSupported()) return;
   try {
     if (pushEnabled) await disablePush();
     else await enablePush();
@@ -1196,8 +1200,10 @@ async function boot({ keepUI } = {}) {
     if (!STATIC) {
       connectSSE();
       if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js').catch(() => {});
-        syncPushStatus();
+        if (pushSupported()) {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+          syncPushStatus();
+        }
       }
     }
   } catch (e) {
@@ -1254,7 +1260,14 @@ function bindUI() {
   // dialog backdrop close
   const dlg = $('#detail');
   dlg.addEventListener('click', e => { if (e.target === dlg) closeSheet(); });
-  dlg.addEventListener('close', () => { openTaskId = null; detailFromSeq = null; replyTo = null; });
+  dlg.addEventListener('close', () => {
+    openTaskId = null;
+    detailFromSeq = null;
+    replyTo = null;
+    const back = detailReturnFocus;
+    detailReturnFocus = null;
+    if (back && document.contains(back)) back.focus();
+  });
 
   // timeline reply buttons
   $('#d-timeline').addEventListener('click', e => {

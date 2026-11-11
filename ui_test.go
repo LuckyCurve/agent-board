@@ -58,3 +58,22 @@ func TestInboxHasPinnedPendingBar(t *testing.T) {
 		t.Fatal("pending bar should start hidden until there is something to decide")
 	}
 }
+
+func TestPushButtonHiddenUntilSupported(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	if !strings.Contains(body, `id="pushToggle"`) {
+		t.Fatal("push toggle missing")
+	}
+	if !strings.Contains(body, `aria-pressed="false" hidden`) {
+		t.Fatal("push toggle should start hidden; JS reveals it only in a secure context")
+	}
+}
+
+func TestDetailTitleIsFocusable(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	if !strings.Contains(body, `id="d-title" tabindex="-1"`) {
+		t.Fatal("detail title should be programmatically focusable")
+	}
+}
