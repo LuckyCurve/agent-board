@@ -858,6 +858,16 @@ func (s *Store) CreateDecision(taskID, question, optionsJSON, key string) (Decis
 		Status: "pending", CreatedAt: ts}, nil
 }
 
+// DecisionTask 查一条待拍板挂在哪张卡上。
+func (s *Store) DecisionTask(id string) (string, error) {
+	var taskID string
+	err := s.db.QueryRow(`SELECT COALESCE(task_id,'') FROM decisions WHERE id=?`, id).Scan(&taskID)
+	if err == sql.ErrNoRows {
+		return "", ErrNotFound
+	}
+	return taskID, err
+}
+
 func (s *Store) AnswerDecision(id, answer, key string) (Decision, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1022,6 +1032,16 @@ func (s *Store) UpdateReply(seq int64, status, agent, note string) (Reply, error
 	return s.ReplyBySeq(seq)
 }
 
+// EventLink 查一条事件挂在哪张卡上：优先 link_task，其次 task_id。
+func (s *Store) EventLink(seq int64) (string, error) {
+	var link string
+	err := s.db.QueryRow(`SELECT COALESCE(NULLIF(link_task,''),COALESCE(task_id,'')) FROM events WHERE seq=?`, seq).Scan(&link)
+	if err == sql.ErrNoRows {
+		return "", ErrNotFound
+	}
+	return link, err
+}
+
 func (s *Store) RepliesByTask(taskID string) ([]Reply, error) {
 	rows, err := s.db.Query(`SELECT `+replyCols+` FROM replies WHERE task_id=? ORDER BY seq ASC`, taskID)
 	if err != nil {
@@ -1049,17 +1069,29 @@ func (s *Store) openReplyForTask(taskID string) *Reply {
 	return &r
 }
 
-func (s *Store) RecentReplies(limit int, freeOnly bool) ([]Reply, error) {
+func (s *Store) RecentReplies(limit int, freeOnly bool, agent string) ([]Reply, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 30
 	}
 	q := `SELECT ` + replyCols + ` FROM replies r WHERE
 		(COALESCE(r.task_id,'')='' OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=r.task_id AND t.column_name='archived'))`
+	args := []any{}
 	if freeOnly {
 		q += ` AND COALESCE(task_id,'')=''`
 	}
+	if agent != "" {
+		// 没挂卡的自由回执人人都看得见；挂了别人的卡就不给。对话回执本身没挂卡，
+		// 但它的消息可能挂在一张卡上，顺着事件查一次。
+		q += ` AND (COALESCE(r.task_id,'')=''
+			OR r.task_id IN (SELECT id FROM tasks WHERE agent=?))
+			AND NOT EXISTS (SELECT 1 FROM events e JOIN tasks t
+				ON t.id=COALESCE(NULLIF(e.link_task,''),COALESCE(e.task_id,''))
+				WHERE e.seq=r.seq AND COALESCE(t.agent,'')<>'' AND t.agent<>?)`
+		args = append(args, agent, agent)
+	}
 	q += ` ORDER BY seq DESC LIMIT ?`
-	rows, err := s.db.Query(q, limit)
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,6 +1165,33 @@ func (s *Store) Ack(name string, seq int64) error {
 //
 // 看板不是人的资产：会话退出、状态无法复原时，主 Agent 可以直接重开一局。
 // 所有入口都需要显式 confirm，避免手滑。
+
+// BoardCountsFor 只数这个 Agent 名下的东西；别人有多少活它看不出来。
+func (s *Store) BoardCountsFor(agent string) (map[string]int, error) {
+	mine := `(SELECT id FROM tasks WHERE agent=?)`
+	queries := []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT COUNT(*) FROM tasks WHERE agent=?`, []any{agent}},
+		{`SELECT COUNT(*) FROM events WHERE COALESCE(NULLIF(link_task,''),task_id,'')=''
+			OR COALESCE(NULLIF(link_task,''),task_id,'') IN ` + mine, []any{agent}},
+		{`SELECT COUNT(*) FROM decisions WHERE task_id IN ` + mine, []any{agent}},
+		{`SELECT COUNT(*) FROM decisions WHERE status='pending' AND task_id IN ` + mine, []any{agent}},
+		{`SELECT COUNT(*) FROM replies WHERE status IN ('received','processing')
+			AND (COALESCE(task_id,'')='' OR task_id IN ` + mine + `)`, []any{agent}},
+	}
+	counts := make([]int, len(queries))
+	for i, q := range queries {
+		if err := s.db.QueryRow(q.sql, q.args...).Scan(&counts[i]); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]int{
+		"tasks": counts[0], "events": counts[1], "decisions": counts[2],
+		"pending_decisions": counts[3], "open_replies": counts[4],
+	}, nil
+}
 
 func (s *Store) BoardCounts() (map[string]int, error) {
 	var tasks, events, decisions, pendingDecisions, openReplies int

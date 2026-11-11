@@ -15,9 +15,56 @@ import (
 )
 
 // client 每次请求都带 Agent token；token 默认从 <data>/token 读，BOARD_TOKEN 可覆盖。
+// identity 是「我是哪个 Agent」，和令牌无关：同一把令牌可以代表不同 Agent。
 type client struct {
-	base  string
-	token string
+	base     string
+	token    string
+	identity string
+}
+
+// cliIdentity 由 --as 或 BOARD_AGENT 指定；空表示主会话，看全量。
+// 刻意不认 --agent：那是「这张卡归谁」，主会话替别人建卡时要用，
+// 拿它当身份会让主会话把自己缩进那个 Agent 的视野里。
+var cliIdentity string
+
+func scanIdentity(args []string) string {
+	identity := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		var val string
+		switch {
+		case a == "--as":
+			if i+1 < len(args) {
+				val = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--as="):
+			val = strings.TrimPrefix(a, "--as=")
+		default:
+			continue
+		}
+		if v := strings.TrimSpace(val); v != "" {
+			identity = v
+		}
+	}
+	return identity
+}
+
+// stripIdentityArgs 把 --as 从参数里摘掉，各子命令的 flag 解析不用认识它。
+func stripIdentityArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--as" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--as=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func newClient() (*client, error) {
@@ -35,7 +82,11 @@ func newClient() (*client, error) {
 	if token == "" {
 		return nil, fmt.Errorf("no agent token: 启动一次 `agent-board serve` 生成 %s，或设置 BOARD_TOKEN", tokenPath)
 	}
-	return &client{base: base, token: token}, nil
+	identity := cliIdentity
+	if identity == "" {
+		identity = strings.TrimSpace(os.Getenv("BOARD_AGENT"))
+	}
+	return &client{base: base, token: token, identity: identity}, nil
 }
 
 func (c *client) rawOnce(method, path string, body any, timeout time.Duration) (int, []byte, error) {
@@ -55,6 +106,9 @@ func (c *client) rawOnce(method, path string, body any, timeout time.Duration) (
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.identity != "" {
+		req.Header.Set(identityHeader, c.identity)
+	}
 	cl := &http.Client{Timeout: timeout}
 	resp, err := cl.Do(req)
 	if err != nil {
@@ -117,6 +171,9 @@ func (c *client) uploadImage(path string) (string, error) {
 	}
 	req.Header.Set("Content-Type", http.DetectContentType(b))
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.identity != "" {
+		req.Header.Set(identityHeader, c.identity)
+	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		return "", err

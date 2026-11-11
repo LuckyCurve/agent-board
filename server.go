@@ -223,9 +223,23 @@ func (s *Server) hasToken(r *http.Request) bool {
 	return err == nil && ok
 }
 
+// identityHeader 是请求里的 Agent 身份，和令牌解耦：
+// 同一把令牌可以代表不同 Agent，服务端只按这个身份收窄数据。
+// 留空或写 main 表示主会话，看全量。
+const identityHeader = "X-Agent-Identity"
+
+// mainIdentity 是主会话身份；它不是某个 Agent 的名字，而是「不设限」。
+const mainIdentity = "main"
+
 // agentScope 决定这个请求能碰哪些 Agent 的卡。
-// 主令牌（网页用的那个）不设限；绑定了 Agent 的令牌只能碰自己名下的卡。
+// 身份优先取请求头（同一令牌可代表不同 Agent），没带才退回令牌绑定的 Agent。
 func (s *Server) agentScope(r *http.Request) string {
+	if id := strings.TrimSpace(r.Header.Get(identityHeader)); id != "" {
+		if strings.EqualFold(id, mainIdentity) {
+			return ""
+		}
+		return id
+	}
 	token := bearerToken(r)
 	if token == "" || s.validToken(token) {
 		return ""
@@ -428,6 +442,17 @@ func (s *Server) handleBoardArchive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
+	// 看板计数也按身份收窄，别让 Agent 从数量上看出别人有多少活。
+	agent := s.agentScope(r)
+	if agent != "" {
+		counts, err := s.store.BoardCountsFor(agent)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
+		return
+	}
 	counts, err := s.store.BoardCounts()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -758,6 +783,22 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// 先查这张待拍板挂在哪张卡上，再按身份判断能不能碰；别人的卡直接 403。
+	if agent := s.agentScope(r); agent != "" {
+		taskID, err := s.store.DecisionTask(r.PathValue("id"))
+		if err == ErrNotFound {
+			writeErr(w, http.StatusNotFound, "decision not found")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if owner, err := s.store.TaskOwner(taskID); err != nil || owner != agent {
+			writeErr(w, http.StatusForbidden, "这张卡不归你管")
+			return
+		}
+	}
 	d, err := s.store.AnswerDecision(r.PathValue("id"), req.Answer, req.Key)
 	if err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "decision not found")
@@ -785,6 +826,30 @@ func (s *Server) handleReplyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// 先确认这条回执归不归你，再动它；不然 403 之前状态已经改了。
+	if agent := s.agentScope(r); agent != "" {
+		cur, err := s.store.ReplyBySeq(seq)
+		if err == ErrNotFound {
+			writeErr(w, http.StatusNotFound, "reply not found")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if cur.TaskID != "" {
+			if owner, err := s.store.TaskOwner(cur.TaskID); err != nil || owner != agent {
+				writeErr(w, http.StatusForbidden, "这条回执不归你管")
+				return
+			}
+		} else if link, err := s.store.EventLink(seq); err == nil && link != "" {
+			// 自由对话的回执本身没挂卡，但它对应的消息可能挂着。
+			if owner, err := s.store.TaskOwner(link); err != nil || owner != agent {
+				writeErr(w, http.StatusForbidden, "这条回执不归你管")
+				return
+			}
+		}
+	}
 	rp, err := s.store.UpdateReply(seq, req.Status, req.Agent, req.Note)
 	if err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "reply not found")
@@ -808,10 +873,13 @@ func (s *Server) handleReplies(w http.ResponseWriter, r *http.Request) {
 	s.store.SweepReplies()
 	limit, _ := strconv.Atoi(r.URL.Query().Get("recent"))
 	free := r.URL.Query().Get("free") == "1"
-	rs, err := s.store.RecentReplies(limit, free)
+	rs, err := s.store.RecentReplies(limit, free, s.agentScope(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if rs == nil {
+		rs = []Reply{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"replies": rs})
 }
@@ -823,6 +891,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if msgs == nil {
+		msgs = []Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 }
@@ -852,6 +923,18 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	author := strings.TrimSpace(req.From)
 	if author == "" {
 		author = "user"
+	}
+	// 身份可以往自己的卡上挂消息；别人的卡直接拒，别让消息落进去。
+	if agent := s.agentScope(r); agent != "" {
+		if author == "user" || author == mainIdentity {
+			author = agent
+		}
+		if taskID := strings.TrimSpace(req.TaskID); taskID != "" {
+			if owner, err := s.store.TaskOwner(taskID); err != nil || owner != agent {
+				writeErr(w, http.StatusForbidden, "这张卡不归你管")
+				return
+			}
+		}
 	}
 	ev, err := s.store.AddChatMessage(req.Text, author, strings.TrimSpace(req.TaskID), req.Images, req.Key)
 	if err == ErrNotFound {

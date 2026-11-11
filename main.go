@@ -282,7 +282,8 @@ func usage() {
   agent-board passwd --password NEW
   agent-board health
 
-环境变量：BOARD_URL（默认 http://127.0.0.1:8765）、BOARD_TOKEN（默认读 <data>/token）、BOARD_PASSWORD、BOARD_DATA
+环境变量：BOARD_URL（默认 http://127.0.0.1:8765）、BOARD_TOKEN（默认读 <data>/token）、BOARD_PASSWORD、BOARD_DATA、BOARD_AGENT
+每个子命令都可加 --as "Agent"（或设 BOARD_AGENT）：只看见该 Agent 名下的数据，越权返回 403；不加则是主会话，全局可见。
 `)
 }
 
@@ -291,6 +292,9 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	// 「我是谁」从整条命令行里认，子命令不用各自处理。
+	cliIdentity = scanIdentity(os.Args[2:])
+	os.Args = append(os.Args[:2:2], stripIdentityArgs(os.Args[2:])...)
 	switch os.Args[1] {
 	case "serve":
 		cmdServe(os.Args[2:])

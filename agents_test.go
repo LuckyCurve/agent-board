@@ -3,11 +3,40 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 )
+
+// reqWithIdentity 用主令牌 + 身份头发请求，模拟「同一把令牌代表不同 Agent」。
+func reqWithIdentity(t *testing.T, e *testEnv, method, path string, body any, token, identity string) (int, map[string]any, *http.Response) {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, e.ts.URL+path, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(identityHeader, identity)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	b, _ := io.ReadAll(resp.Body)
+	_ = json.Unmarshal(b, &out)
+	return resp.StatusCode, out, resp
+}
 
 // reqWithToken 用指定令牌发请求。
 func reqWithToken(t *testing.T, e *testEnv, method, path string, body any, token string) (int, map[string]any, *http.Response) {
@@ -188,6 +217,212 @@ func TestAgentsList(t *testing.T) {
 	agents := body["agents"].([]any)
 	if len(agents) != 2 {
 		t.Fatalf("应该有 2 个 Agent: %v", agents)
+	}
+}
+
+// 身份隔离：同一把令牌可以代表不同 Agent，服务端按身份收窄，不靠令牌。
+func TestIdentityIsolationByHeader(t *testing.T) {
+	e := newTestEnv(t)
+
+	// 主会话建两张卡，分别归 a1 / a2。
+	code, body, _ := e.req(t, "POST", "/api/tasks", map[string]any{
+		"title": "a1 的卡", "agent": "a1", "column": "doing"})
+	if code != http.StatusCreated {
+		t.Fatalf("建 a1 的卡: %d %v", code, body)
+	}
+	mine := body["task"].(map[string]any)["id"].(string)
+	code, body, _ = e.req(t, "POST", "/api/tasks", map[string]any{
+		"title": "a2 的卡", "agent": "a2", "column": "doing"})
+	if code != http.StatusCreated {
+		t.Fatalf("建 a2 的卡: %d %v", code, body)
+	}
+	theirs := body["task"].(map[string]any)["id"].(string)
+
+	// 给 a2 的卡挂一条待拍板和一条对话，确认 a1 看不到。
+	code, body, _ = e.req(t, "POST", "/api/decisions", map[string]any{
+		"task_id": theirs, "question": "a2 要拍板的事", "options": []string{"行", "不行"}})
+	if code != http.StatusCreated {
+		t.Fatalf("建待拍板: %d %v", code, body)
+	}
+	decisionID := body["decision"].(map[string]any)["id"].(string)
+	code, body, _ = e.req(t, "POST", "/api/message", map[string]any{
+		"text": "a2 卡上的话", "from": "a2", "task_id": theirs})
+	if code != http.StatusCreated {
+		t.Fatalf("发消息: %d %v", code, body)
+	}
+	code, body, _ = e.req(t, "POST", "/api/tasks/"+theirs+"/events", map[string]any{
+		"kind": "progress", "text": "a2 的进展", "agent": "a2"})
+	if code != http.StatusCreated {
+		t.Fatalf("写事件: %d %v", code, body)
+	}
+
+	// 同一把主令牌，只是带上 a1 的身份。
+	asA1 := func(method, path string, body any) (int, map[string]any) {
+		t.Helper()
+		code, out, _ := reqWithIdentity(t, e, method, path, body, e.token, "a1")
+		return code, out
+	}
+
+	// 列表里只有自己的卡。
+	code, out := asA1("GET", "/api/tasks", nil)
+	if code != http.StatusOK {
+		t.Fatalf("列卡: %d %v", code, out)
+	}
+	tasks := out["tasks"].([]any)
+	if len(tasks) != 1 || tasks[0].(map[string]any)["id"] != mine {
+		t.Fatalf("a1 只该看见自己的卡: %v", tasks)
+	}
+
+	// 别人的卡：读、写都 403，不是静默空。
+	if code, _ = asA1("GET", "/api/tasks/"+theirs, nil); code != http.StatusForbidden {
+		t.Fatalf("读别人的卡: %d, want 403", code)
+	}
+	if code, _ = asA1("POST", "/api/tasks/"+theirs+"/events", map[string]any{
+		"kind": "note", "text": "插一脚"}); code != http.StatusForbidden {
+		t.Fatalf("往别人的卡写事件: %d, want 403", code)
+	}
+	if code, _ = asA1("PATCH", "/api/tasks/"+theirs, map[string]any{"column": "done"}); code != http.StatusForbidden {
+		t.Fatalf("动别人的卡: %d, want 403", code)
+	}
+	if code, _ = asA1("GET", "/api/tasks/"+theirs+"/events", nil); code != http.StatusForbidden {
+		t.Fatalf("看别人的事件: %d, want 403", code)
+	}
+	if code, _ = asA1("POST", "/api/message", map[string]any{
+		"text": "挂到别人卡上", "task_id": theirs}); code != http.StatusForbidden {
+		t.Fatalf("往别人的卡发消息: %d, want 403", code)
+	}
+	if code, _ = asA1("POST", "/api/decisions/"+decisionID+"/answer",
+		map[string]any{"answer": "行"}); code != http.StatusForbidden {
+		t.Fatalf("答别人的待拍板: %d, want 403", code)
+	}
+
+	// 别人的待拍板、回执、对话都不返回。
+	code, out = asA1("GET", "/api/decisions?status=pending", nil)
+	if code != http.StatusOK {
+		t.Fatalf("看待拍板: %d %v", code, out)
+	}
+	if n := len(out["decisions"].([]any)); n != 0 {
+		t.Fatalf("a1 不该看见 a2 的待拍板: %v", out["decisions"])
+	}
+	code, out = asA1("GET", "/api/chat?recent=50", nil)
+	if code != http.StatusOK {
+		t.Fatalf("看对话: %d %v", code, out)
+	}
+	for _, m := range out["messages"].([]any) {
+		if m.(map[string]any)["body"] == "a2 卡上的话" {
+			t.Fatal("a1 不该看见 a2 卡上的消息")
+		}
+	}
+	code, out = asA1("GET", "/api/replies?recent=50", nil)
+	if code != http.StatusOK {
+		t.Fatalf("看回执: %d %v", code, out)
+	}
+	for _, rp := range out["replies"].([]any) {
+		m := rp.(map[string]any)
+		if m["task_id"] == theirs {
+			t.Fatalf("a1 不该看见 a2 卡上的回执: %v", rp)
+		}
+		// 自由对话的回执本身不挂卡，但它对应的消息挂着 a2 的卡，同样不能给。
+		if m["text"] == "a2 卡上的话" {
+			t.Fatalf("a1 不该看见 a2 卡上消息的回执: %v", rp)
+		}
+	}
+
+	// 自己名下照常能改。
+	if code, _ = asA1("PATCH", "/api/tasks/"+mine, map[string]any{"column": "done"}); code != http.StatusOK {
+		t.Fatalf("动自己的卡: %d, want 200", code)
+	}
+
+	// 主会话（不带身份）全局可见。
+	code, out, _ = e.req(t, "GET", "/api/tasks", nil)
+	if code != http.StatusOK || len(out["tasks"].([]any)) != 2 {
+		t.Fatalf("主会话该看见全部: %d %v", code, out)
+	}
+}
+
+// 身份头也可以只带 main，等价于主会话。
+func TestIdentityMainSeesEverything(t *testing.T) {
+	e := newTestEnv(t)
+	e.createTask(t, "a1 的卡", "doing")
+	code, out, _ := reqWithIdentity(t, e, "GET", "/api/tasks", nil, e.token, "main")
+	if code != http.StatusOK {
+		t.Fatalf("列卡: %d %v", code, out)
+	}
+	if n := len(out["tasks"].([]any)); n != 1 {
+		t.Fatalf("main 该看见全部: %v", out["tasks"])
+	}
+}
+
+// 回执：身份不符时连状态都不能改，且不能先改后拒。
+func TestReplyUpdateRespectsIdentity(t *testing.T) {
+	e := newTestEnv(t)
+	code, body, _ := e.req(t, "POST", "/api/tasks", map[string]any{
+		"title": "a2 的卡", "agent": "a2", "column": "doing"})
+	if code != http.StatusCreated {
+		t.Fatalf("建卡: %d %v", code, body)
+	}
+	id := body["task"].(map[string]any)["id"].(string)
+	code, body, _ = e.req(t, "POST", "/api/message", map[string]any{
+		"text": "要处理的一句话", "from": "user", "task_id": id})
+	if code != http.StatusCreated {
+		t.Fatalf("发消息: %d %v", code, body)
+	}
+	seq := body["event"].(map[string]any)["seq"]
+
+	code, out, _ := reqWithIdentity(t, e, "PATCH", "/api/replies/"+fmt.Sprint(seq),
+		map[string]any{"status": "done"}, e.token, "a1")
+	if code != http.StatusForbidden {
+		t.Fatalf("改别人卡上的回执: %d %v", code, out)
+	}
+	// 被拒之后状态没变。
+	code, out, _ = e.req(t, "GET", "/api/replies?recent=10", nil)
+	if code != http.StatusOK {
+		t.Fatalf("看回执: %d", code)
+	}
+	for _, rp := range out["replies"].([]any) {
+		m := rp.(map[string]any)
+		if m["seq"] == seq && m["status"] == "done" {
+			t.Fatalf("403 之前状态已经被改了: %v", m)
+		}
+	}
+}
+
+// 看板计数也按身份收窄。
+func TestBoardCountsScoped(t *testing.T) {
+	e := newTestEnv(t)
+	e.createTask(t, "a1 的卡", "doing")
+	code, body, _ := e.req(t, "POST", "/api/tasks", map[string]any{
+		"title": "a2 的卡", "agent": "a2", "column": "doing"})
+	if code != http.StatusCreated {
+		t.Fatalf("建卡: %d %v", code, body)
+	}
+	code, out, _ := reqWithIdentity(t, e, "GET", "/api/board", nil, e.token, "a1")
+	if code != http.StatusOK {
+		t.Fatalf("看计数: %d %v", code, out)
+	}
+	if n := out["counts"].(map[string]any)["tasks"]; n != float64(1) {
+		t.Fatalf("a1 的卡数应该是 1: %v", n)
+	}
+	code, out, _ = e.req(t, "GET", "/api/board", nil)
+	if code != http.StatusOK || out["counts"].(map[string]any)["tasks"] != float64(2) {
+		t.Fatalf("主会话该看见 2 张: %d %v", code, out)
+	}
+}
+
+// 老的 --agent 令牌绑定仍然生效，没有因为身份头机制被破坏。
+func TestLegacyAgentTokenStillScoped(t *testing.T) {
+	e := newTestEnv(t)
+	agentToken := "legacy-a2-token"
+	if err := e.store.SaveAgentToken(sessionHash(agentToken), "a2"); err != nil {
+		t.Fatal(err)
+	}
+	e.createTask(t, "a1 的卡", "doing")
+	code, out, _ := reqWithToken(t, e, "GET", "/api/tasks", nil, agentToken)
+	if code != http.StatusOK {
+		t.Fatalf("列卡: %d %v", code, out)
+	}
+	if n := len(out["tasks"].([]any)); n != 0 {
+		t.Fatalf("a2 的令牌不该看见 a1 的卡: %v", out["tasks"])
 	}
 }
 
