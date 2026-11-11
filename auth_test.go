@@ -278,6 +278,19 @@ func TestPasswordHashingAndBootstrap(t *testing.T) {
 	}
 }
 
+func TestPasswordChangeTakesEffectWithoutRestart(t *testing.T) {
+	e := newTestServer(t, Config{Version: "test"}, testPassHash)
+	if err := e.store.metaSet("password_hash", hashPassword("new-pw")); err != nil {
+		t.Fatal(err)
+	}
+	if got := postLogin(t, e, "test-pw").StatusCode; got != http.StatusUnauthorized {
+		t.Fatalf("old password: got %d want 401", got)
+	}
+	if got := postLogin(t, e, "new-pw").StatusCode; got != http.StatusOK {
+		t.Fatalf("new password: got %d want 200", got)
+	}
+}
+
 func TestSessionStoreExpiry(t *testing.T) {
 	st := testStore(t)
 	if err := st.CreateSession("tok", -time.Minute); err != nil {

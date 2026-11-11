@@ -73,10 +73,6 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	passHash, err := store.metaGet("password_hash")
-	if err != nil {
-		log.Fatal(err)
-	}
 	// 旧版本把口令明文写进文件；启动时顺手清掉。
 	os.Remove(p.legacyPassword)
 
@@ -94,7 +90,7 @@ func cmdServe(args []string) {
 	}
 
 	srv := NewServer(store, Config{Addr: *addr, Version: version, SecureCookie: *secure,
-		LoginDelay: 250 * time.Millisecond}, passHash)
+		LoginDelay: 250 * time.Millisecond})
 	if err := srv.Run(); err != nil {
 		log.Fatal(err)
 	}

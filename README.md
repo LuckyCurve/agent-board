@@ -21,7 +21,7 @@ go build -o agent-board.exe .
 # 自己指定口令（也可用 BOARD_PASSWORD）
 ./agent-board.exe serve --password '你的口令'
 # 丢了口令
-./agent-board.exe passwd --password '新口令'
+./agent-board.exe passwd --password '新口令'   # 立即生效，已有会话全部失效
 ```
 
 换端口/数据目录：`serve --addr 127.0.0.1:9000 --data D:/board`。

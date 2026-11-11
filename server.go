@@ -37,15 +37,13 @@ type Config struct {
 type Server struct {
 	store     *Store
 	cfg       Config
-	passHash  string
 	loginRate *loginLimiter
 }
 
-func NewServer(store *Store, cfg Config, passHash string) *Server {
+func NewServer(store *Store, cfg Config) *Server {
 	return &Server{
 		store:     store,
 		cfg:       cfg,
-		passHash:  passHash,
 		loginRate: newLoginLimiter(cfg.LoginLimit, cfg.LoginWindow),
 	}
 }
@@ -210,7 +208,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if !verifyPassword(s.passHash, req.Password) {
+	passHash, err := s.store.metaGet("password_hash")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !verifyPassword(passHash, req.Password) {
 		s.loginRate.fail(ip)
 		if s.cfg.LoginDelay > 0 {
 			time.Sleep(s.cfg.LoginDelay)

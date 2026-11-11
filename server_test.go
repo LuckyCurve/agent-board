@@ -34,7 +34,10 @@ func newTestServer(t *testing.T, cfg Config, passHash string) *testEnv {
 	if cfg.Addr == "" {
 		cfg.Addr = "127.0.0.1:0"
 	}
-	s := NewServer(st, cfg, passHash)
+	if err := st.metaSet("password_hash", passHash); err != nil {
+		t.Fatalf("seed password: %v", err)
+	}
+	s := NewServer(st, cfg)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return &testEnv{store: st, srv: s, ts: ts}
