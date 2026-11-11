@@ -451,7 +451,10 @@ async function sendReply() {
   } finally {
     btn.disabled = false;
     btn.classList.remove('sending');
-    input.focus();
+    // 刷新可能换掉输入框，重新取一次再聚焦。
+    const live = $('#composeInput');
+    if (live) live.focus();
+    else input.focus();
   }
 }
 
@@ -476,10 +479,17 @@ async function sendFreeMessage(text) {
   if (!text) return;
   try {
     await api('/api/message', { method: 'POST', body: { text, key: uid() } });
+    // 先清掉草稿和当前框里的字，刷新后 renderInbox 才不会把旧内容填回去。
     freeDraft = '';
+    const sent = $('#freeInput');
+    if (sent) { sent.value = ''; autogrow(sent); }
     toast('已发出，主会话已接到');
     await Promise.all([refreshFreeReplies(), refreshDecisions()]);
+    const after = $('#freeInput');
+    if (after) { after.value = ''; autogrow(after); after.focus(); }
   } catch (e) {
+    const fi = $('#freeInput');
+    if (fi) fi.focus();
     if (e.message !== 'unauthorized') toast('发送失败：' + e.message, 'bad');
   }
 }
@@ -514,9 +524,12 @@ function decisionHTML(d) {
 }
 
 function messageHTML(r) {
-  return `<li class="msg-item">
+  const agent = r.author && r.author !== 'user';
+  const who = agent ? (r.author || 'Agent') : '你';
+  return `<li class="msg-item${agent ? ' agent' : ''}">
+    <div class="msg-who">${esc(who)}</div>
     <div class="msg-text">${esc(r.text)}</div>
-    <div class="msg-foot">${statusBadge(r)}<time>${rel(r.created_at)}</time></div>
+    <div class="msg-foot">${agent ? '' : statusBadge(r)}<time>${rel(r.created_at)}</time></div>
   </li>`;
 }
 
@@ -541,7 +554,7 @@ function renderInbox() {
     <section class="inbox-section">
       <h2 class="sec-h">跟主会话说一句</h2>
       <form class="free-compose" id="freeForm">
-        <textarea id="freeInput" rows="1" placeholder="不用挂任务，直接发…">${esc(freeDraft)}</textarea>
+        <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="不用挂任务，直接发…">${esc(freeDraft)}</textarea>
         <button class="send-btn" type="submit" aria-label="发送">
           <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
         </button>
@@ -815,7 +828,7 @@ function bindUI() {
   const ci = $('#composeInput');
   ci.addEventListener('input', () => autogrow(ci));
   ci.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendReply();
     }
@@ -840,6 +853,15 @@ function bindUI() {
       e.preventDefault();
       const input = form.querySelector('input');
       if (input && input.value.trim()) answerDecision(form.dataset.decision, input.value.trim());
+    }
+  });
+  $('#inbox').addEventListener('keydown', e => {
+    if (e.target.id !== 'freeInput') return;
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      const t = e.target;
+      if (t.form && t.form.requestSubmit) t.form.requestSubmit();
+      else if (t.value.trim()) sendFreeMessage(t.value);
     }
   });
   $('#inbox').addEventListener('input', e => {

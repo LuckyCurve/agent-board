@@ -65,12 +65,15 @@ agent-board board            # 当前任务/事件/待拍板数量
 `watch` 输出的行：
 
 ```
-BOARD_USER_REPLY      | seq=42 | task=T-1 | agent=wealth 开发 | text=保留，但只给月度报表用 | data={"reply_to_seq":7}
-BOARD_USER_MESSAGE    | seq=43 | text=看板先做只读版就行
-BOARD_DECISION_ANSWERED | seq=44 | task=T-3 | text=按项目拆
+BOARD_USER_REPLY      | seq=42 | task=T-1 | agent=wealth 开发 | author=user | text=保留，但只给月度报表用 | data={"reply_to_seq":7}
+BOARD_USER_MESSAGE    | seq=43 | author=user | text=看板先做只读版就行
+BOARD_AGENT_MESSAGE   | seq=44 | author=main | text=已经改成只读版了
+BOARD_DECISION_ANSWERED | seq=45 | task=T-3 | author=user | text=按项目拆
 ```
 
 收到 `BOARD_USER_REPLY` 后用 `SendMessage` 派给 `agent`，再 `dispatch` 记录派发；`task` 是卡片号。处理完 `ack`。
+
+主会话自己说话用 `agent-board message --text "..." --from main`。这类回话在 `watch` 里是 `BOARD_AGENT_MESSAGE`，不会把卡片点亮成「执行中」，也不会生成待处理的回执。
 
 ## 重开一局
 
@@ -105,6 +108,7 @@ agent-board reset --yes     # 清空所有数据，编号回到 T-1 / D-1
 ## 回执状态
 
 用户每次输入会生成一条回执：`received → processing → done | failed | timeout`。
+Agent 自己发的话（`message --from <agent>`）直接是 `done`，不需要人再 ack。
 
 - 收到即 `received`（卡片上亮 ✓）
 - 主会话 `watch` 领取自动变 `processing`（显示哪个 Agent 在处理）

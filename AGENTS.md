@@ -23,6 +23,7 @@ Monitor: agent-board watch
 |---|---|
 | `BOARD_USER_REPLY` | `SendMessage` 给 `agent` 字段；然后 `agent-board dispatch --seq N --to "Agent"`；办完 `agent-board ack --seq N` |
 | `BOARD_USER_MESSAGE` | 自己处理，办完 `agent-board ack --seq N` |
+| `BOARD_AGENT_MESSAGE` | 自己发的回话，不用派活；不要 `ack` |
 | `BOARD_DECISION_ANSWERED` | 按答案派给卡片归属 Agent，`dispatch` + `ack` |
 | `BOARD_DECISION` | 提醒用户去收件箱拍板（Telegram 单向提醒会同时发出） |
 | `BOARD_EVENT` | 进展，不用派活 |
@@ -38,6 +39,7 @@ agent-board task new --title "..." --project ... --agent "..."   # 建卡
 agent-board progress T-1 "一行进展" --agent "..."                # 进展
 agent-board ask --task T-1 --question "..." --options "A,B"       # 待拍板
 agent-board done T-1 --text "结论"                                # 完成
+agent-board message --text "..." --from main                      # 主会话自己回话
 ```
 
 - 结论写 `conclusion`，不要只写 `note`。

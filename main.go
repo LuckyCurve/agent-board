@@ -245,7 +245,7 @@ func usage() {
   agent-board ack --seq N [--consumer main]
   agent-board take --seq N [--agent X]
   agent-board fail --seq N --reason "..."
-  agent-board message --text "..."
+  agent-board message --text "..." [--from main]
   agent-board replies [--recent 20] [--free]
   agent-board reset --yes          # 清空一切，编号重来
   agent-board archive --yes        # 全部收进已完成，保留历史

@@ -23,6 +23,7 @@ type Event struct {
 	Type      string `json:"type"`
 	TaskID    string `json:"task_id,omitempty"`
 	Agent     string `json:"agent,omitempty"`
+	Author    string `json:"author,omitempty"`
 	Session   string `json:"session,omitempty"`
 	Kind      string `json:"kind,omitempty"`
 	Body      string `json:"body,omitempty"`
@@ -50,6 +51,7 @@ type Reply struct {
 	Seq       int64  `json:"seq"`
 	TaskID    string `json:"task_id,omitempty"`
 	Agent     string `json:"agent,omitempty"`
+	Author    string `json:"author,omitempty"`
 	Text      string `json:"text"`
 	Status    string `json:"status"`
 	Note      string `json:"note,omitempty"`
@@ -108,6 +110,7 @@ CREATE TABLE IF NOT EXISTS events (
   type TEXT NOT NULL,
   task_id TEXT,
   agent TEXT,
+  author TEXT,
   session TEXT,
   kind TEXT,
   body TEXT,
@@ -146,6 +149,7 @@ CREATE TABLE IF NOT EXISTS replies (
   seq INTEGER PRIMARY KEY,
   task_id TEXT,
   agent TEXT,
+  author TEXT,
   text TEXT NOT NULL,
   status TEXT NOT NULL,
   note TEXT,
@@ -161,6 +165,47 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 `)
+	if err != nil {
+		return err
+	}
+	// 老库补列：author 用来区分用户和 Agent 的回话。
+	for _, c := range []struct{ table, column string }{
+		{"events", "author"},
+		{"replies", "author"},
+	} {
+		if err := s.ensureColumn(c.table, c.column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureColumn(table, column string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	exists := false
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, typ        string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			exists = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || exists {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` TEXT`)
 	return err
 }
 
@@ -249,14 +294,14 @@ func insertEvent(tx *sql.Tx, e *Event) (int64, bool, error) {
 		err error
 	)
 	if e.Key != "" {
-		res, err = tx.Exec(`INSERT INTO events(idem_key,type,task_id,agent,session,kind,body,data,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`,
-			e.Key, e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Session),
+		res, err = tx.Exec(`INSERT INTO events(idem_key,type,task_id,agent,author,session,kind,body,data,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`,
+			e.Key, e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Author), nullify(e.Session),
 			nullify(e.Kind), nullify(e.Body), nullify(e.Data), e.CreatedAt)
 	} else {
-		res, err = tx.Exec(`INSERT INTO events(type,task_id,agent,session,kind,body,data,created_at)
-			VALUES(?,?,?,?,?,?,?,?)`,
-			e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Session),
+		res, err = tx.Exec(`INSERT INTO events(type,task_id,agent,author,session,kind,body,data,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?)`,
+			e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Author), nullify(e.Session),
 			nullify(e.Kind), nullify(e.Body), nullify(e.Data), e.CreatedAt)
 	}
 	if err != nil {
@@ -322,9 +367,12 @@ func (s *Store) CreateTask(title, project, agent, column, key string) (Task, err
 		CreatedAt: ts, UpdatedAt: ts, LastSeq: seq}, nil
 }
 
-func (s *Store) AddEvent(taskID, typ, kind, body, agent, session, data, key string) (Event, error) {
+func (s *Store) AddEvent(taskID, typ, kind, body, agent, author, session, data, key string) (Event, error) {
 	if typ == "" {
 		typ = "event"
+	}
+	if (kind == "user_reply" || kind == "user_reaction") && author == "" {
+		author = "user"
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -344,7 +392,7 @@ func (s *Store) AddEvent(taskID, typ, kind, body, agent, session, data, key stri
 			agent = taskAgent
 		}
 	}
-	ev := &Event{Key: key, Type: typ, TaskID: taskID, Agent: agent,
+	ev := &Event{Key: key, Type: typ, TaskID: taskID, Agent: agent, Author: author,
 		Session: session, Kind: kind, Body: body, Data: data}
 	seq, dup, err := insertEvent(tx, ev)
 	if err != nil {
@@ -355,7 +403,7 @@ func (s *Store) AddEvent(taskID, typ, kind, body, agent, session, data, key stri
 			return Event{}, err
 		}
 		if kind == "user_reply" || kind == "user_reaction" {
-			if err := addReplyTx(tx, seq, taskID, agent, body); err != nil {
+			if err := addReplyTx(tx, seq, taskID, agent, author, body); err != nil {
 				return Event{}, err
 			}
 		}
@@ -438,10 +486,10 @@ func (s *Store) ListTasks() ([]Task, error) {
 
 func (s *Store) lastEvent(taskID string) (*Event, error) {
 	var e Event
-	err := s.db.QueryRow(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),
+	err := s.db.QueryRow(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
 		COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 1`, taskID).
-		Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Session, &e.Kind, &e.Body, &e.Data, &e.CreatedAt)
+		Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Author, &e.Session, &e.Kind, &e.Body, &e.Data, &e.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -469,7 +517,7 @@ func (s *Store) GetTask(taskID string) (Task, []Event, error) {
 }
 
 func (s *Store) EventsByTask(taskID string, limit int) ([]Event, error) {
-	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),
+	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
 		COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events WHERE task_id=? ORDER BY seq ASC LIMIT ?`, taskID, limit)
 	if err != nil {
@@ -480,7 +528,7 @@ func (s *Store) EventsByTask(taskID string, limit int) ([]Event, error) {
 }
 
 func (s *Store) EventsAfter(seq int64, limit int) ([]Event, error) {
-	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),
+	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
 		COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events WHERE seq>? ORDER BY seq ASC LIMIT ?`, seq, limit)
 	if err != nil {
@@ -494,7 +542,7 @@ func scanEvents(rows *sql.Rows) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Session,
+		if err := rows.Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Author, &e.Session,
 			&e.Kind, &e.Body, &e.Data, &e.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -588,7 +636,7 @@ func (s *Store) AnswerDecision(id, answer, key string) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	if err := addReplyTx(tx, seq, d.TaskID, taskAgent, answer); err != nil {
+	if err := addReplyTx(tx, seq, d.TaskID, taskAgent, "user", answer); err != nil {
 		return Decision{}, err
 	}
 	if err := touchTask(tx, d.TaskID, seq); err != nil {
@@ -651,12 +699,18 @@ var replyStatuses = map[string]bool{
 	"received": true, "processing": true, "done": true, "failed": true, "timeout": true,
 }
 
-const replyCols = `seq,COALESCE(task_id,''),COALESCE(agent,''),text,status,COALESCE(note,''),created_at,updated_at`
+const replyCols = `seq,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),text,status,COALESCE(note,''),created_at,updated_at`
 
-func addReplyTx(tx *sql.Tx, seq int64, taskID, agent, text string) error {
+func addReplyTx(tx *sql.Tx, seq int64, taskID, agent, author, text string) error {
 	ts := nowISO()
-	_, err := tx.Exec(`INSERT OR IGNORE INTO replies(seq,task_id,agent,text,status,created_at,updated_at)
-		VALUES(?,?,?,?,'received',?,?)`, seq, nullify(taskID), nullify(agent), text, ts, ts)
+	status := "received"
+	if author != "" && author != "user" {
+		// Agent 自己发的消息已经送达，不需要用户侧再处理。
+		status = "done"
+	}
+	_, err := tx.Exec(`INSERT OR IGNORE INTO replies(seq,task_id,agent,author,text,status,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`, seq, nullify(taskID), nullify(agent), nullify(author),
+		text, status, ts, ts)
 	return err
 }
 
@@ -672,7 +726,7 @@ func (s *Store) SweepReplies() {
 
 func scanReplyRow(sc interface{ Scan(...any) error }) (Reply, error) {
 	var r Reply
-	err := sc.Scan(&r.Seq, &r.TaskID, &r.Agent, &r.Text, &r.Status, &r.Note, &r.CreatedAt, &r.UpdatedAt)
+	err := sc.Scan(&r.Seq, &r.TaskID, &r.Agent, &r.Author, &r.Text, &r.Status, &r.Note, &r.CreatedAt, &r.UpdatedAt)
 	return r, err
 }
 

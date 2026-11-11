@@ -461,6 +461,7 @@ func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 		Kind    string `json:"kind"`
 		Text    string `json:"text"`
 		Agent   string `json:"agent"`
+		Author  string `json:"author"`
 		Session string `json:"session"`
 		Data    string `json:"data"`
 		Key     string `json:"key"`
@@ -480,8 +481,11 @@ func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "text required")
 		return
 	}
+	if (req.Kind == "user_reply" || req.Kind == "user_reaction") && req.Author == "" {
+		req.Author = "user"
+	}
 	ev, err := s.store.AddEvent(r.PathValue("id"), "event", req.Kind, req.Text,
-		req.Agent, req.Session, req.Data, req.Key)
+		req.Agent, req.Author, req.Session, req.Data, req.Key)
 	if err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
@@ -612,10 +616,12 @@ func (s *Server) handleReplies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"replies": rs})
 }
 
-// POST /api/message 是「随手发给主会话」的入口：不挂任务，但同样走回执状态机。
+// POST /api/message 是「随手发一句」的入口：user 的消息等主会话处理，
+// agent 的回话直接进收件箱供用户看，不产生待办回执。
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Text string `json:"text"`
+		From string `json:"from"`
 		Key  string `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -626,7 +632,12 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "text required")
 		return
 	}
-	ev, err := s.store.AddEvent("", "event", "user_reply", req.Text, "", "", `{"free":true}`, req.Key)
+	author := strings.TrimSpace(req.From)
+	if author == "" {
+		author = "user"
+	}
+	data, _ := json.Marshal(map[string]any{"free": true, "author": author})
+	ev, err := s.store.AddEvent("", "event", "user_reply", req.Text, "", author, "", string(data), req.Key)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

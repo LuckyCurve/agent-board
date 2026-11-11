@@ -418,8 +418,9 @@ func cmdWatch(args []string) {
 				since = ev.Seq
 				continue
 			}
-			// 主会话接手即亮「执行中」，用户不用等正文。
-			if ev.Kind == "user_reply" || ev.Kind == "user_reaction" || ev.Type == "decision.answered" {
+			// 用户发来的输入才亮「执行中」；Agent 自己的回话不处理。
+			if eventAuthor(ev) == "user" &&
+				(ev.Kind == "user_reply" || ev.Kind == "user_reaction" || ev.Type == "decision.answered") {
 				_, _, _ = c.raw("PATCH", fmt.Sprintf("/api/replies/%d", ev.Seq),
 					map[string]string{"status": "processing", "agent": ev.Agent}, 10*time.Second)
 			}
@@ -439,17 +440,27 @@ func cmdWatch(args []string) {
 	}
 }
 
+func eventAuthor(ev Event) string {
+	if ev.Author == "" {
+		return "user"
+	}
+	return ev.Author
+}
+
 func printEventLine(ev Event) {
 	text := oneLine(ev.Body, 800)
+	author := eventAuthor(ev)
 	switch {
 	case ev.Type == "decision.answered":
-		fmt.Printf("BOARD_DECISION_ANSWERED | seq=%d | task=%s | agent=%s | text=%s | data=%s\n",
-			ev.Seq, ev.TaskID, ev.Agent, text, ev.Data)
+		fmt.Printf("BOARD_DECISION_ANSWERED | seq=%d | task=%s | agent=%s | author=%s | text=%s | data=%s\n",
+			ev.Seq, ev.TaskID, ev.Agent, author, text, ev.Data)
+	case ev.Kind == "user_reply" && ev.TaskID == "" && author == "user":
+		fmt.Printf("BOARD_USER_MESSAGE | seq=%d | author=user | text=%s | data=%s\n", ev.Seq, text, ev.Data)
 	case ev.Kind == "user_reply" && ev.TaskID == "":
-		fmt.Printf("BOARD_USER_MESSAGE | seq=%d | text=%s | data=%s\n", ev.Seq, text, ev.Data)
+		fmt.Printf("BOARD_AGENT_MESSAGE | seq=%d | author=%s | text=%s | data=%s\n", ev.Seq, author, text, ev.Data)
 	case ev.Kind == "user_reply" || ev.Kind == "user_reaction":
-		fmt.Printf("BOARD_USER_REPLY | seq=%d | task=%s | agent=%s | text=%s | data=%s\n",
-			ev.Seq, ev.TaskID, ev.Agent, text, ev.Data)
+		fmt.Printf("BOARD_USER_REPLY | seq=%d | task=%s | agent=%s | author=%s | text=%s | data=%s\n",
+			ev.Seq, ev.TaskID, ev.Agent, author, text, ev.Data)
 	case ev.Type == "decision.created":
 		fmt.Printf("BOARD_DECISION | seq=%d | task=%s | agent=%s | text=%s | data=%s\n",
 			ev.Seq, ev.TaskID, ev.Agent, text, ev.Data)
@@ -566,18 +577,19 @@ func cmdFail(args []string) {
 
 func cmdMessage(args []string) {
 	fs := flag.NewFlagSet("message", flag.ExitOnError)
-	text := fs.String("text", "", "free message to the main session")
+	text := fs.String("text", "", "free message text")
+	from := fs.String("from", "user", "author: user or agent name")
 	key := fs.String("key", "", "idempotency key")
 	fs.Parse(args)
 	if *text == "" {
-		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\"")
+		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\" [--from main]")
 		os.Exit(2)
 	}
 	var resp struct {
 		Event Event `json:"event"`
 	}
 	if err := mustClient().do("POST", "/api/message",
-		map[string]string{"text": *text, "key": *key}, &resp); err != nil {
+		map[string]string{"text": *text, "from": *from, "key": *key}, &resp); err != nil {
 		fail(err)
 	}
 	fmt.Printf("ok seq=%d\n", resp.Event.Seq)

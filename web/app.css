@@ -1004,6 +1004,17 @@ dialog.sheet:not([open]) { display: none; }
   border-radius: 11px;
   padding: 12px 14px;
 }
+.msg-item.agent {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+}
+.msg-who {
+  margin-bottom: 5px;
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: .06em;
+}
+.msg-item.agent .msg-who { color: var(--accent); font-weight: 600; }
 .msg-text { font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-foot {
   display: flex;
