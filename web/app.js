@@ -32,6 +32,8 @@ let es = null;
 let chatPinned = true;     // 消息流是否贴着底部；用户往上翻时关闭
 let pendingOpen = false;   // 「等你决定」列表是否展开
 let flashSeq = 0;          // 刚从待拍板跳进来的消息，渲染后闪一下
+let pendingImages = [];    // 已上传、等随消息发出的图片 id
+let uploadingImages = 0;   // 还在上传的张数
 let systemNote = '';       // /状态 等本地提示，不落库
 
 function chatNearBottom(el) {
@@ -326,6 +328,7 @@ function timelineHTML(events, replies) {
           </span>
         </div>
         <p class="tl-body">${esc(e.body)}</p>
+        ${imagesHTML(e.data, 'tl-images')}
         ${quoteHTML(e, bySeq)}
         ${r ? `<div class="tl-status">${statusBadge(r)}</div>` : ''}
         ${e.agent && !r ? `<span class="tl-agent">${(e.kind === 'user_reply' || e.kind === 'user_reaction') ? '→ ' : ''}${esc(e.agent)}</span>` : ''}
@@ -533,19 +536,106 @@ function statusSummary() {
   return `进行中 ${doing} · 待拍板 ${state.decisions.length} · 阻塞/失败 ${failed || blocked} · 已完成 ${done}`;
 }
 
+function clearComposeImages() {
+  pendingImages = [];
+  renderComposeImages();
+}
+
+function renderComposeImages() {
+  const box = $('#freeImages');
+  if (!box) return;
+  box.hidden = pendingImages.length === 0;
+  box.innerHTML = pendingImages.map((id, i) => `<span class="ci">
+    <img src="/images/${esc(id)}" alt="待发送图片 ${i + 1}">
+    <button type="button" class="ci-x" data-remove-image="${i}" aria-label="移除图片">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </span>`).join('');
+}
+
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+const IMAGE_MAX_BYTES = 5 << 20;
+
+async function uploadImageFiles(files) {
+  const list = Array.from(files).filter(f => IMAGE_TYPES.includes(f.type));
+  if (!list.length) {
+    toast('只支持 PNG / JPG / WebP 图片', 'bad');
+    return;
+  }
+  for (const f of list) {
+    if (pendingImages.length >= 6) { toast('一条消息最多 6 张图', 'bad'); break; }
+    if (f.size > IMAGE_MAX_BYTES) { toast('单张图片不能超过 5MB', 'bad'); continue; }
+    uploadingImages++;
+    try {
+      const res = await fetch('/api/images', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: authHeaders({ 'Content-Type': f.type }),
+        body: f,
+      });
+      if (res.status === 401) {
+        location.replace('/login?next=' + encodeURIComponent(location.pathname));
+        throw new Error('unauthorized');
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+      pendingImages.push(data.id);
+      renderComposeImages();
+    } catch (e) {
+      if (e.message !== 'unauthorized') toast('图片上传失败：' + e.message, 'bad');
+    } finally {
+      uploadingImages--;
+    }
+  }
+  const fi = $('#freeInput');
+  if (fi) fi.focus();
+}
+
+function imagesHTML(dataStr, cls = '') {
+  let ids = [];
+  try { ids = parseData(dataStr).images || []; } catch (_) {}
+  if (!Array.isArray(ids) || !ids.length) return '';
+  return `<div class="img-grid ${cls}">${ids.map(id =>
+    `<button type="button" class="img-thumb" data-image="${esc(id)}" aria-label="查看图片">
+      <img src="/images/${esc(id)}" alt="图片" loading="lazy">
+    </button>`).join('')}</div>`;
+}
+
+function openLightbox(id) {
+  const dlg = $('#lightbox');
+  const img = $('#lightboxImg');
+  if (!dlg || !img) return;
+  img.src = '/images/' + id;
+  if (!dlg.open) dlg.showModal();
+}
+
+function closeLightbox() {
+  const dlg = $('#lightbox');
+  if (dlg && dlg.open) dlg.close();
+  const img = $('#lightboxImg');
+  if (img) img.removeAttribute('src');
+}
+
 async function sendFreeMessage(text) {
   text = (text || '').trim();
-  if (!text) return;
+  const images = pendingImages.slice();
+  if (!text && !images.length) return;
+  if (uploadingImages > 0) {
+    toast('图片还在上传，稍等一下');
+    return;
+  }
   if (text[0] === '/') {
+    if (images.length) { toast('指令不能带图片', 'bad'); return; }
     await runCommand(text);
     return;
   }
   try {
-    await api('/api/message', { method: 'POST', body: { text, key: uid() } });
+    await api('/api/message', { method: 'POST', body: { text, images, key: uid() } });
     // 先清掉草稿和当前框里的字，刷新后 renderInbox 才不会把旧内容填回去。
     systemNote = '';
     freeDraft = '';
     chatPinned = true;
+    clearComposeImages();
     const sent = $('#freeInput');
     if (sent) { sent.value = ''; autogrow(sent); }
     toast('已发出，主会话已接到');
@@ -701,7 +791,8 @@ function messageHTML(m) {
     : '';
   return `<li class="msg-item${agent ? ' agent' : ''}${sig && sig.kind === 'failed' ? ' danger' : ''}" data-seq="${m.seq}">
     <div class="msg-who">${esc(who)}</div>
-    <div class="msg-text">${esc(m.body)}</div>
+    ${m.body ? `<div class="msg-text">${esc(m.body)}</div>` : ''}
+    ${imagesHTML(m.data)}
     ${alert}
     <div class="msg-foot">${chip}<time>${rel(m.created_at)}</time></div>
   </li>`;
@@ -792,11 +883,23 @@ function renderInbox() {
       </section>
     </div>
     <form class="free-compose" id="freeForm">
-      <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="发消息…（/ 开头看指令）">${esc(freeDraft)}</textarea>
-      <button class="send-btn" type="submit" aria-label="发送">
-        <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
-      </button>
+      <div class="compose-images" id="freeImages" hidden></div>
+      <div class="free-row">
+        <button type="button" class="attach-btn" data-attach aria-label="选择图片" title="选择图片">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/></svg>
+        </button>
+        <button type="button" class="attach-btn" data-camera aria-label="拍照" title="拍照">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.6-2h6.8L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.2"/></svg>
+        </button>
+        <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="发消息…">${esc(freeDraft)}</textarea>
+        <button class="send-btn" type="submit" aria-label="发送">
+          <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        </button>
+      </div>
+      <input type="file" id="freeFile" accept="image/png,image/jpeg,image/webp" multiple hidden>
+      <input type="file" id="freeCam" accept="image/*" capture="environment" hidden>
     </form>`;
+  renderComposeImages();
   const fi = $('#freeInput');
   if (fi) autogrow(fi);
 
@@ -1192,17 +1295,48 @@ function bindUI() {
 
   // inbox delegation
   $('#inbox').addEventListener('click', e => {
+    const rm = e.target.closest('[data-remove-image]');
+    if (rm) {
+      pendingImages.splice(Number(rm.dataset.removeImage), 1);
+      renderComposeImages();
+      return;
+    }
+    const pick = e.target.closest('[data-attach]');
+    if (pick) { const f = $('#freeFile'); if (f) f.click(); return; }
+    const snap = e.target.closest('[data-camera]');
+    if (snap) { const f = $('#freeCam'); if (f) f.click(); return; }
     const ans = e.target.closest('[data-answer]');
     if (ans) { answerDecision(ans.dataset.answer, ans.dataset.value); return; }
     const taskBtn = e.target.closest('[data-task]');
     if (taskBtn) openTask(taskBtn.dataset.task, Number(taskBtn.dataset.msg) || null);
+  });
+  $('#inbox').addEventListener('change', e => {
+    const t = e.target;
+    if (t.id !== 'freeFile' && t.id !== 'freeCam') return;
+    if (t.files && t.files.length) uploadImageFiles(t.files);
+    t.value = '';
+  });
+  $('#inbox').addEventListener('paste', e => {
+    if (e.target.id !== 'freeInput' || !e.clipboardData) return;
+    const files = Array.from(e.clipboardData.items)
+      .filter(i => i.kind === 'file' && i.type.startsWith('image/'))
+      .map(i => i.getAsFile())
+      .filter(Boolean);
+    if (files.length) { e.preventDefault(); uploadImageFiles(files); }
+  });
+  // 图片放大：消息、卡片时间线、待发预览都走同一个灯箱。
+  document.addEventListener('click', e => {
+    const thumb = e.target.closest('[data-image]');
+    if (thumb) { openLightbox(thumb.dataset.image); return; }
+    if (e.target.closest('#lightboxClose')) { closeLightbox(); return; }
+    if (e.target.id === 'lightbox') closeLightbox();
   });
   $('#inbox').addEventListener('submit', e => {
     const form = e.target;
     if (form.id === 'freeForm') {
       e.preventDefault();
       const input = form.querySelector('textarea');
-      if (input && input.value.trim()) sendFreeMessage(input.value);
+      if (input && (input.value.trim() || pendingImages.length)) sendFreeMessage(input.value);
       return;
     }
     if (form.matches('[data-decision]')) {

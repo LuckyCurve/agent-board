@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -38,19 +39,29 @@ type Config struct {
 	// 轮换后无需重启。两者都为空时所有接口都拒绝。
 	Token     string
 	TokenFile string
+	// ImagesDir 存消息/事件里的图片；留空时退回临时目录（测试用）。
+	ImagesDir string
+	// ImageMaxBytes 单张上限；0 用默认 5MB。
+	ImageMaxBytes int64
 }
 
 type Server struct {
 	store     *Store
 	cfg       Config
 	loginRate *loginLimiter
+	imagesDir string
 }
 
 func NewServer(store *Store, cfg Config) *Server {
+	dir := cfg.ImagesDir
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "agent-board-images")
+	}
 	return &Server{
 		store:     store,
 		cfg:       cfg,
 		loginRate: newLoginLimiter(cfg.LoginLimit, cfg.LoginWindow),
+		imagesDir: dir,
 	}
 }
 
@@ -92,6 +103,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/replies/{seq}", s.authed(s.handleReplyUpdate))
 	mux.HandleFunc("GET /api/chat", s.authed(s.handleChat))
 	mux.HandleFunc("POST /api/message", s.authed(s.handleMessage))
+	mux.HandleFunc("POST /api/images", s.authed(s.handleImageUpload))
+	mux.HandleFunc("GET /images/{name}", s.authedMedia(s.handleImageGet))
 	mux.HandleFunc("GET /api/push/key", s.authed(s.handlePushKey))
 	mux.HandleFunc("GET /api/push/status", s.authed(s.handlePushStatus))
 	mux.HandleFunc("POST /api/push/subscribe", s.authed(s.handlePushSubscribe))
@@ -466,13 +479,14 @@ var allowedEventKinds = map[string]bool{
 
 func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Kind    string `json:"kind"`
-		Text    string `json:"text"`
-		Agent   string `json:"agent"`
-		Author  string `json:"author"`
-		Session string `json:"session"`
-		Data    string `json:"data"`
-		Key     string `json:"key"`
+		Kind    string   `json:"kind"`
+		Text    string   `json:"text"`
+		Agent   string   `json:"agent"`
+		Author  string   `json:"author"`
+		Session string   `json:"session"`
+		Data    string   `json:"data"`
+		Images  []string `json:"images"`
+		Key     string   `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json")
@@ -485,15 +499,24 @@ func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "unknown kind: "+req.Kind)
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" && req.Data == "" {
-		writeErr(w, http.StatusBadRequest, "text required")
+	if strings.TrimSpace(req.Text) == "" && req.Data == "" && len(req.Images) == 0 {
+		writeErr(w, http.StatusBadRequest, "text or image required")
+		return
+	}
+	if err := s.validateImageIDs(req.Images); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	data, err := mergeImagesIntoData(req.Data, req.Images)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if (req.Kind == "user_reply" || req.Kind == "user_reaction") && req.Author == "" {
 		req.Author = "user"
 	}
 	ev, err := s.store.AddEvent(r.PathValue("id"), "event", req.Kind, req.Text,
-		req.Agent, req.Author, req.Session, req.Data, req.Key)
+		req.Agent, req.Author, req.Session, data, req.Key)
 	if err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
@@ -660,8 +683,12 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" {
-		writeErr(w, http.StatusBadRequest, "text required")
+	if strings.TrimSpace(req.Text) == "" && len(req.Images) == 0 {
+		writeErr(w, http.StatusBadRequest, "text or image required")
+		return
+	}
+	if err := s.validateImageIDs(req.Images); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	author := strings.TrimSpace(req.From)

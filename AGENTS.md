@@ -32,6 +32,14 @@ Monitor: agent-board watch
 
 会话结束前：还有未结项就 `agent-board archive --yes`；整个看板都过期了才 `agent-board reset --yes`。
 
+## 每次交付
+
+改完不要只提交，固定三步，缺一不可：
+
+1. **重启本地服务**：换新二进制，保持 `0.0.0.0:8765` 可访问，确认能用口令登录。
+2. **推送 GitHub**：推 `main`，等 Actions 变绿（`gh run watch <id> --exit-status`）。
+3. **结论带回**：在结论里写清新 PID 和 CI 状态。
+
 ## 其他 Agent
 
 ```bash

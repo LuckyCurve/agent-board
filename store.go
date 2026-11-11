@@ -482,7 +482,7 @@ func (s *Store) AddEvent(taskID, typ, kind, body, agent, author, session, data, 
 // 不写进卡片时间线，也不改卡片的「最新进展」。
 func (s *Store) AddChatMessage(text, author, linkTask string, images []string, key string) (Event, error) {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(images) == 0 {
 		return Event{}, errors.New("text required")
 	}
 	if author == "" {

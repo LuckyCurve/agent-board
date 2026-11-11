@@ -96,6 +96,57 @@ func (c *client) do(method, path string, body, out any) error {
 	return nil
 }
 
+// stringList 让 --image 可以写多次。
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// uploadImage 原样传图片字节，类型以服务端魔数为准。
+func (c *client) uploadImage(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest("POST", c.base+"/api/images", bytes.NewReader(b))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", http.DetectContentType(b))
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return "", errors.New(apiError(out, resp.StatusCode))
+	}
+	var got struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		return "", err
+	}
+	return got.ID, nil
+}
+
+func uploadImages(c *client, paths []string) ([]string, error) {
+	ids := make([]string, 0, len(paths))
+	for _, p := range paths {
+		id, err := c.uploadImage(p)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 func mustClient() *client {
 	c, err := newClient()
 	if err != nil {
@@ -261,12 +312,19 @@ func cmdQuickEvent(args []string, kind string) {
 	agent := fs.String("agent", "", "agent name")
 	session := fs.String("session", "", "session id")
 	key := fs.String("key", "", "idempotency key")
+	var images stringList
+	fs.Var(&images, "image", "attach an image file (repeatable)")
 	fs.Parse(args[2:])
+	c := mustClient()
+	ids, uploadErr := uploadImages(c, images)
+	if uploadErr != nil {
+		fail(uploadErr)
+	}
 	var resp struct {
 		Event Event `json:"event"`
 	}
-	err := mustClient().do("POST", "/api/tasks/"+url.PathEscape(task)+"/events", map[string]string{
-		"kind": kind, "text": text, "agent": *agent, "session": *session, "key": *key,
+	err := c.do("POST", "/api/tasks/"+url.PathEscape(task)+"/events", map[string]any{
+		"kind": kind, "text": text, "agent": *agent, "session": *session, "key": *key, "images": ids,
 	}, &resp)
 	if err != nil {
 		fail(err)
@@ -581,16 +639,23 @@ func cmdMessage(args []string) {
 	from := fs.String("from", "user", "author: user or agent name")
 	task := fs.String("task", "", "link the message to a task")
 	key := fs.String("key", "", "idempotency key")
+	var images stringList
+	fs.Var(&images, "image", "attach an image file (repeatable)")
 	fs.Parse(args)
-	if *text == "" {
-		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\" [--from main] [--task T-1]")
+	if *text == "" && len(images) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\" [--from main] [--task T-1] [--image a.png --image b.jpg]")
 		os.Exit(2)
+	}
+	c := mustClient()
+	ids, err := uploadImages(c, images)
+	if err != nil {
+		fail(err)
 	}
 	var resp struct {
 		Event Event `json:"event"`
 	}
-	if err := mustClient().do("POST", "/api/message",
-		map[string]string{"text": *text, "from": *from, "task_id": *task, "key": *key}, &resp); err != nil {
+	if err := c.do("POST", "/api/message",
+		map[string]any{"text": *text, "from": *from, "task_id": *task, "key": *key, "images": ids}, &resp); err != nil {
 		fail(err)
 	}
 	fmt.Printf("ok seq=%d\n", resp.Event.Seq)

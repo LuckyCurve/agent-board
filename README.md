@@ -48,7 +48,12 @@ agent-board task new --title "把导出层改成流式写入" --project 财富 -
 agent-board progress T-1 "42 项单测全过，内存峰值 1.2G → 180M" --agent "wealth 开发"
 agent-board ask --task T-1 --question "Excel 导出还要保留吗？" --options "保留,只 CSV,先不做"
 agent-board done T-1 --text "已合入，单测通过"
+# 带图：message / progress / note / event 都支持，可重复写
+agent-board message --text "跑通了" --from main --image shot.png
+agent-board progress T-1 "界面长这样" --image before.png --image after.png
 ```
+
+图片存 `<data>/images/`，只收 PNG / JPG / WebP，单张 ≤5MB、每条 ≤6 张；按魔数识别，不认扩展名。网页里可点选、粘贴、拍照上传，缩略图点开看大图。启动时清掉 30 天前的旧图。
 
 `BOARD_URL` 默认 `http://127.0.0.1:8765`。
 

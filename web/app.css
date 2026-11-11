@@ -1110,8 +1110,8 @@ dialog.sheet:not([open]) { display: none; }
 }
 .free-compose {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: 14px;
@@ -1119,6 +1119,110 @@ dialog.sheet:not([open]) { display: none; }
   margin-bottom: 12px;
   box-shadow: var(--shadow-card);
 }
+.free-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.compose-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 4px 0;
+}
+.ci {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex: none;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.ci img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ci-x {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .58);
+  color: #fff;
+}
+.ci-x svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+.attach-btn {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--muted);
+}
+.attach-btn:hover { background: var(--surface-2); color: var(--text); }
+.attach-btn svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.img-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.img-thumb {
+  width: 96px;
+  height: 96px;
+  flex: none;
+  padding: 0;
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.img-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.img-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tl-images .img-thumb { width: 72px; height: 72px; }
+.lightbox {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: rgba(8, 7, 5, .92);
+  display: none;
+  place-items: center;
+}
+.lightbox[open] { display: grid; }
+.lightbox::backdrop { background: rgba(8, 7, 5, .92); }
+.lightbox img {
+  max-width: 94vw;
+  max-height: 88vh;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.lb-close {
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top));
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .12);
+  color: #fff;
+}
+.lb-close svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .free-compose textarea {
   flex: 1;
   min-height: 44px;

@@ -109,7 +109,11 @@ func cmdServe(args []string) {
 	}
 
 	srv := NewServer(store, Config{Addr: *addr, Version: version, SecureCookie: *secure,
-		LoginDelay: 250 * time.Millisecond, TokenFile: p.token})
+		LoginDelay: 250 * time.Millisecond, TokenFile: p.token,
+		ImagesDir: filepath.Join(p.data, "images")})
+	if n, err := srv.cleanupImages(30 * 24 * time.Hour); err == nil && n > 0 {
+		fmt.Printf("  images:   清理了 %d 张 30 天前的旧图\n", n)
+	}
 	if err := srv.Run(); err != nil {
 		log.Fatal(err)
 	}

@@ -35,6 +35,9 @@ func newTestServer(t *testing.T, cfg Config, passHash string) *testEnv {
 	if cfg.Addr == "" {
 		cfg.Addr = "127.0.0.1:0"
 	}
+	if cfg.ImagesDir == "" {
+		cfg.ImagesDir = filepath.Join(dir, "images")
+	}
 	if cfg.Token == "" && cfg.TokenFile == "" {
 		cfg.Token = "test-token"
 	}
