@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,58 +14,112 @@ import (
 	"time"
 )
 
+// client 复用登录后拿到的会话 cookie；没有会话时用 BOARD_PASSWORD 自动登录一次。
 type client struct {
-	base  string
-	token string
+	base     string
+	password string
+	cookie   string
 }
 
-func newClient(tokenFlag string) (*client, error) {
-	base := envOr("BOARD_URL", "http://127.0.0.1:8765")
-	base = strings.TrimRight(base, "/")
-	tok := tokenFlag
-	if tok == "" {
-		tok = os.Getenv("BOARD_TOKEN")
-	}
-	if tok == "" {
-		if p, err := resolvePaths("", ""); err == nil {
-			if b, err := os.ReadFile(p.token); err == nil {
-				tok = strings.TrimSpace(string(b))
-			}
+func newClient() (*client, error) {
+	base := strings.TrimRight(envOr("BOARD_URL", "http://127.0.0.1:8765"), "/")
+	c := &client{base: base, password: os.Getenv("BOARD_PASSWORD")}
+	if p, err := resolvePaths("", ""); err == nil {
+		if b, err := os.ReadFile(p.session); err == nil {
+			c.cookie = strings.TrimSpace(string(b))
 		}
 	}
-	if tok == "" {
-		return nil, fmt.Errorf("no token: set BOARD_TOKEN, or run `agent-board serve` once to create ~/.agent-board/token")
-	}
-	return &client{base: base, token: tok}, nil
+	return c, nil
 }
 
-func (c *client) raw(method, path string, body any, timeout time.Duration) (int, []byte, error) {
+func (c *client) saveSession(token string) error {
+	c.cookie = token
+	p, err := resolvePaths("", "")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p.session, []byte(token+"\n"), 0o600)
+}
+
+func (c *client) clearSession() {
+	c.cookie = ""
+	if p, err := resolvePaths("", ""); err == nil {
+		os.Remove(p.session)
+	}
+}
+
+func (c *client) login() error {
+	if c.password == "" {
+		return errors.New("未登录：运行 agent-board login --password ... 或设置 BOARD_PASSWORD")
+	}
+	code, b, cookies, err := c.rawOnce("POST", "/api/login",
+		map[string]string{"password": c.password}, 15*time.Second)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("登录失败: %s", apiError(b, code))
+	}
+	for _, ck := range cookies {
+		if ck.Name == sessionCookie && ck.Value != "" {
+			return c.saveSession(ck.Value)
+		}
+	}
+	return errors.New("登录响应没有会话 cookie")
+}
+
+func (c *client) rawOnce(method, path string, body any, timeout time.Duration) (int, []byte, []*http.Cookie, error) {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		r = bytes.NewReader(b)
 	}
 	req, err := http.NewRequest(method, c.base+path, r)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.cookie != "" {
+		req.Header.Set("Cookie", sessionCookie+"="+c.cookie)
 	}
 	cl := &http.Client{Timeout: timeout}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, b, err
+	return resp.StatusCode, b, resp.Cookies(), err
+}
+
+func (c *client) raw(method, path string, body any, timeout time.Duration) (int, []byte, error) {
+	code, b, _, err := c.rawOnce(method, path, body, timeout)
+	if err != nil {
+		return 0, nil, err
+	}
+	if code != http.StatusUnauthorized || c.password == "" {
+		return code, b, nil
+	}
+	if err := c.login(); err != nil {
+		return code, b, err
+	}
+	code, b, _, err = c.rawOnce(method, path, body, timeout)
+	return code, b, err
+}
+
+func apiError(b []byte, code int) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(b, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	return fmt.Sprintf("http %d: %s", code, strings.TrimSpace(string(b)))
 }
 
 func (c *client) do(method, path string, body, out any) error {
@@ -72,14 +127,11 @@ func (c *client) do(method, path string, body, out any) error {
 	if err != nil {
 		return err
 	}
+	if code == http.StatusUnauthorized {
+		return errors.New("未登录：运行 agent-board login --password ... 或设置 BOARD_PASSWORD")
+	}
 	if code >= 400 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(b, &e) == nil && e.Error != "" {
-			return fmt.Errorf("%s", e.Error)
-		}
-		return fmt.Errorf("http %d: %s", code, strings.TrimSpace(string(b)))
+		return errors.New(apiError(b, code))
 	}
 	if out != nil {
 		return json.Unmarshal(b, out)
@@ -87,13 +139,42 @@ func (c *client) do(method, path string, body, out any) error {
 	return nil
 }
 
-func mustClient(tokenFlag string) *client {
-	c, err := newClient(tokenFlag)
+func mustClient() *client {
+	c, err := newClient()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	return c
+}
+
+func cmdLogin(args []string) {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	pass := fs.String("password", "", "web password")
+	fs.Parse(args)
+	pw := *pass
+	if pw == "" {
+		pw = os.Getenv("BOARD_PASSWORD")
+	}
+	if pw == "" {
+		fmt.Fprintln(os.Stderr, "usage: agent-board login --password ...（也可用 BOARD_PASSWORD）")
+		os.Exit(2)
+	}
+	c := mustClient()
+	c.password = pw
+	if err := c.login(); err != nil {
+		fail(err)
+	}
+	fmt.Println("logged in")
+}
+
+func cmdLogout(args []string) {
+	c := mustClient()
+	if c.cookie != "" {
+		_, _, _, _ = c.rawOnce("POST", "/api/logout", nil, 15*time.Second)
+	}
+	c.clearSession()
+	fmt.Println("logged out")
 }
 
 func cmdTask(args []string) {
@@ -109,7 +190,6 @@ func cmdTask(args []string) {
 		agent := fs.String("agent", "", "owning agent")
 		column := fs.String("column", "todo", "todo|doing|blocked|done")
 		key := fs.String("key", "", "idempotency key")
-		token := fs.String("token", "", "bearer token")
 		fs.Parse(args[1:])
 		if *title == "" {
 			fmt.Fprintln(os.Stderr, "--title required")
@@ -118,7 +198,7 @@ func cmdTask(args []string) {
 		var resp struct {
 			Task Task `json:"task"`
 		}
-		err := mustClient(*token).do("POST", "/api/tasks", map[string]string{
+		err := mustClient().do("POST", "/api/tasks", map[string]string{
 			"title": *title, "project": *project, "agent": *agent,
 			"column": *column, "key": *key,
 		}, &resp)
@@ -130,9 +210,8 @@ func cmdTask(args []string) {
 	case "list":
 		fs := flag.NewFlagSet("task list", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "print raw json")
-		token := fs.String("token", "", "bearer token")
 		fs.Parse(args[1:])
-		code, b, err := mustClient(*token).raw("GET", "/api/tasks", nil, 15*time.Second)
+		code, b, err := mustClient().raw("GET", "/api/tasks", nil, 15*time.Second)
 		if err != nil {
 			fail(err)
 		}
@@ -180,7 +259,7 @@ func cmdTask(args []string) {
 			Task   Task    `json:"task"`
 			Events []Event `json:"events"`
 		}
-		if err := mustClient("").do("GET", "/api/tasks/"+url.PathEscape(args[1]), nil, &resp); err != nil {
+		if err := mustClient().do("GET", "/api/tasks/"+url.PathEscape(args[1]), nil, &resp); err != nil {
 			fail(err)
 		}
 		t := resp.Task
@@ -210,7 +289,7 @@ func cmdMove(args []string) {
 		os.Exit(2)
 	}
 	var resp map[string]any
-	if err := mustClient("").do("PATCH", "/api/tasks/"+url.PathEscape(args[0]),
+	if err := mustClient().do("PATCH", "/api/tasks/"+url.PathEscape(args[0]),
 		map[string]string{"column": args[1]}, &resp); err != nil {
 		fail(err)
 	}
@@ -226,7 +305,6 @@ func cmdEvent(args []string, defaultKind string) {
 	session := fs.String("session", "", "session id")
 	data := fs.String("data", "", "extra json")
 	key := fs.String("key", "", "idempotency key")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *task == "" || (*text == "" && *data == "") {
 		fmt.Fprintln(os.Stderr, "usage: agent-board event --task T-1 --kind progress --text \"...\"")
@@ -235,7 +313,7 @@ func cmdEvent(args []string, defaultKind string) {
 	var resp struct {
 		Event Event `json:"event"`
 	}
-	err := mustClient(*token).do("POST", "/api/tasks/"+url.PathEscape(*task)+"/events", map[string]string{
+	err := mustClient().do("POST", "/api/tasks/"+url.PathEscape(*task)+"/events", map[string]string{
 		"kind": *kind, "text": *text, "agent": *agent, "session": *session,
 		"data": *data, "key": *key,
 	}, &resp)
@@ -255,12 +333,11 @@ func cmdQuickEvent(args []string, kind string) {
 	agent := fs.String("agent", "", "agent name")
 	session := fs.String("session", "", "session id")
 	key := fs.String("key", "", "idempotency key")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args[2:])
 	var resp struct {
 		Event Event `json:"event"`
 	}
-	err := mustClient(*token).do("POST", "/api/tasks/"+url.PathEscape(task)+"/events", map[string]string{
+	err := mustClient().do("POST", "/api/tasks/"+url.PathEscape(task)+"/events", map[string]string{
 		"kind": kind, "text": text, "agent": *agent, "session": *session, "key": *key,
 	}, &resp)
 	if err != nil {
@@ -280,13 +357,12 @@ func cmdDone(args []string) {
 	agent := fs.String("agent", "", "agent name")
 	session := fs.String("session", "", "session id")
 	key := fs.String("key", "", "idempotency key")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args[1:])
 	if *text == "" {
 		fmt.Fprintln(os.Stderr, "--text required")
 		os.Exit(2)
 	}
-	c := mustClient(*token)
+	c := mustClient()
 	// 先移列再写结论：卡片上的「最新进展」才会是结论本身。
 	if err := c.do("PATCH", "/api/tasks/"+url.PathEscape(task),
 		map[string]string{"column": "done"}, nil); err != nil {
@@ -309,7 +385,6 @@ func cmdAsk(args []string) {
 	question := fs.String("question", "", "decision question")
 	options := fs.String("options", "同意,不同意", "comma separated options")
 	key := fs.String("key", "", "idempotency key")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *task == "" || *question == "" {
 		fmt.Fprintln(os.Stderr, "usage: agent-board ask --task T-1 --question \"...\" --options \"同意,重做\"")
@@ -325,7 +400,7 @@ func cmdAsk(args []string) {
 	var resp struct {
 		Decision Decision `json:"decision"`
 	}
-	err := mustClient(*token).do("POST", "/api/decisions", map[string]any{
+	err := mustClient().do("POST", "/api/decisions", map[string]any{
 		"task_id": *task, "question": *question, "options": opts, "key": *key,
 	}, &resp)
 	if err != nil {
@@ -337,7 +412,6 @@ func cmdAsk(args []string) {
 func cmdDecisions(args []string) {
 	fs := flag.NewFlagSet("decisions", flag.ExitOnError)
 	status := fs.String("status", "pending", "pending|answered|all")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	q := ""
 	if *status != "all" && *status != "" {
@@ -346,7 +420,7 @@ func cmdDecisions(args []string) {
 	var resp struct {
 		Decisions []Decision `json:"decisions"`
 	}
-	if err := mustClient(*token).do("GET", "/api/decisions"+q, nil, &resp); err != nil {
+	if err := mustClient().do("GET", "/api/decisions"+q, nil, &resp); err != nil {
 		fail(err)
 	}
 	if len(resp.Decisions) == 0 {
@@ -362,9 +436,8 @@ func cmdWatch(args []string) {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	consumer := fs.String("consumer", "main", "consumer name")
 	sinceFlag := fs.Int64("since", -1, "start seq (default: server acked_seq)")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
-	c := mustClient(*token)
+	c := mustClient()
 
 	since := *sinceFlag
 	if since < 0 {
@@ -389,6 +462,9 @@ func cmdWatch(args []string) {
 			fmt.Fprintf(os.Stderr, "watch: %v\n", err)
 			time.Sleep(3 * time.Second)
 			continue
+		}
+		if code == http.StatusUnauthorized {
+			fail(errors.New("登录已过期：运行 agent-board login --password ... 或设置 BOARD_PASSWORD"))
 		}
 		if code >= 400 {
 			fmt.Fprintf(os.Stderr, "watch: http %d %s\n", code, strings.TrimSpace(string(b)))
@@ -460,13 +536,12 @@ func cmdDispatch(args []string) {
 	seq := fs.Int64("seq", -1, "reply event seq")
 	to := fs.String("to", "", "agent to dispatch to")
 	note := fs.String("note", "", "optional dispatch note")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *seq < 0 || *to == "" {
 		fmt.Fprintln(os.Stderr, "usage: agent-board dispatch --seq N --to \"Agent\" [--note \"...\"]")
 		os.Exit(2)
 	}
-	c := mustClient(*token)
+	c := mustClient()
 	var pr struct {
 		Reply Reply `json:"reply"`
 	}
@@ -492,7 +567,6 @@ func cmdDispatch(args []string) {
 func cmdBoardLifecycle(args []string, mode string) {
 	fs := flag.NewFlagSet(mode, flag.ExitOnError)
 	yes := fs.Bool("yes", false, "confirm the destructive action")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if !*yes {
 		if mode == "reset" {
@@ -503,7 +577,7 @@ func cmdBoardLifecycle(args []string, mode string) {
 		os.Exit(2)
 	}
 	var resp map[string]any
-	if err := mustClient(*token).do("POST", "/api/board/"+mode,
+	if err := mustClient().do("POST", "/api/board/"+mode,
 		map[string]string{"confirm": mode}, &resp); err != nil {
 		fail(err)
 	}
@@ -512,12 +586,11 @@ func cmdBoardLifecycle(args []string, mode string) {
 
 func cmdBoard(args []string) {
 	fs := flag.NewFlagSet("board", flag.ExitOnError)
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	var resp struct {
 		Counts map[string]int `json:"counts"`
 	}
-	if err := mustClient(*token).do("GET", "/api/board", nil, &resp); err != nil {
+	if err := mustClient().do("GET", "/api/board", nil, &resp); err != nil {
 		fail(err)
 	}
 	fmt.Printf("tasks=%d events=%d decisions=%d 待拍板=%d 未结回执=%d\n",
@@ -529,7 +602,6 @@ func cmdTake(args []string) {
 	fs := flag.NewFlagSet("take", flag.ExitOnError)
 	seq := fs.Int64("seq", -1, "reply event seq")
 	agent := fs.String("agent", "", "agent now handling it")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *seq < 0 {
 		fmt.Fprintln(os.Stderr, "usage: agent-board take --seq N [--agent X]")
@@ -538,7 +610,7 @@ func cmdTake(args []string) {
 	var resp struct {
 		Reply Reply `json:"reply"`
 	}
-	if err := mustClient(*token).do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
+	if err := mustClient().do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
 		map[string]string{"status": "processing", "agent": *agent}, &resp); err != nil {
 		fail(err)
 	}
@@ -549,7 +621,6 @@ func cmdFail(args []string) {
 	fs := flag.NewFlagSet("fail", flag.ExitOnError)
 	seq := fs.Int64("seq", -1, "reply event seq")
 	reason := fs.String("reason", "", "why it failed")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *seq < 0 {
 		fmt.Fprintln(os.Stderr, "usage: agent-board fail --seq N --reason \"...\"")
@@ -558,7 +629,7 @@ func cmdFail(args []string) {
 	var resp struct {
 		Reply Reply `json:"reply"`
 	}
-	if err := mustClient(*token).do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
+	if err := mustClient().do("PATCH", fmt.Sprintf("/api/replies/%d", *seq),
 		map[string]string{"status": "failed", "note": *reason}, &resp); err != nil {
 		fail(err)
 	}
@@ -569,7 +640,6 @@ func cmdMessage(args []string) {
 	fs := flag.NewFlagSet("message", flag.ExitOnError)
 	text := fs.String("text", "", "free message to the main session")
 	key := fs.String("key", "", "idempotency key")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *text == "" {
 		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\"")
@@ -578,7 +648,7 @@ func cmdMessage(args []string) {
 	var resp struct {
 		Event Event `json:"event"`
 	}
-	if err := mustClient(*token).do("POST", "/api/message",
+	if err := mustClient().do("POST", "/api/message",
 		map[string]string{"text": *text, "key": *key}, &resp); err != nil {
 		fail(err)
 	}
@@ -589,7 +659,6 @@ func cmdReplies(args []string) {
 	fs := flag.NewFlagSet("replies", flag.ExitOnError)
 	recent := fs.Int("recent", 20, "how many")
 	free := fs.Bool("free", false, "only free messages")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	q := fmt.Sprintf("/api/replies?recent=%d", *recent)
 	if *free {
@@ -598,7 +667,7 @@ func cmdReplies(args []string) {
 	var resp struct {
 		Replies []Reply `json:"replies"`
 	}
-	if err := mustClient(*token).do("GET", q, nil, &resp); err != nil {
+	if err := mustClient().do("GET", q, nil, &resp); err != nil {
 		fail(err)
 	}
 	for _, r := range resp.Replies {
@@ -610,13 +679,12 @@ func cmdAck(args []string) {
 	fs := flag.NewFlagSet("ack", flag.ExitOnError)
 	seq := fs.Int64("seq", -1, "event seq")
 	consumer := fs.String("consumer", "main", "consumer name")
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
 	if *seq < 0 {
 		fmt.Fprintln(os.Stderr, "usage: agent-board ack --seq N")
 		os.Exit(2)
 	}
-	if err := mustClient(*token).do("POST", "/api/ack", map[string]any{
+	if err := mustClient().do("POST", "/api/ack", map[string]any{
 		"consumer": *consumer, "seq": *seq}, nil); err != nil {
 		fail(err)
 	}
@@ -625,19 +693,14 @@ func cmdAck(args []string) {
 
 func cmdHealth(args []string) {
 	fs := flag.NewFlagSet("health", flag.ExitOnError)
-	token := fs.String("token", "", "bearer token")
 	fs.Parse(args)
-	base := strings.TrimRight(envOr("BOARD_URL", "http://127.0.0.1:8765"), "/")
-	req, _ := http.NewRequest("GET", base+"/api/health", nil)
-	if t := *token; t != "" {
-		req.Header.Set("Authorization", "Bearer "+t)
-	}
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	code, b, err := mustClient().raw("GET", "/api/health", nil, 5*time.Second)
 	if err != nil {
 		fail(err)
 	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	if code >= 400 {
+		fail(errors.New(apiError(b, code)))
+	}
 	fmt.Println(strings.TrimSpace(string(b)))
 }
 

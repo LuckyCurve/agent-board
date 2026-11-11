@@ -1,22 +1,22 @@
 package main
 
 import (
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const version = "0.1.0"
 
 type paths struct {
-	data     string
-	db       string
-	token    string
-	password string
+	data           string
+	db             string
+	session        string
+	legacyPassword string
 }
 
 func resolvePaths(dataFlag, dbFlag string) (paths, error) {
@@ -39,10 +39,10 @@ func resolvePaths(dataFlag, dbFlag string) (paths, error) {
 		db = filepath.Join(data, "board.db")
 	}
 	return paths{
-		data:     data,
-		db:       db,
-		token:    filepath.Join(data, "token"),
-		password: filepath.Join(data, "password.txt"),
+		data:           data,
+		db:             db,
+		session:        filepath.Join(data, "session"),
+		legacyPassword: filepath.Join(data, "password.txt"),
 	}, nil
 }
 
@@ -51,8 +51,7 @@ func cmdServe(args []string) {
 	addr := fs.String("addr", envOr("BOARD_ADDR", "127.0.0.1:8765"), "listen address")
 	dataFlag := fs.String("data", "", "data directory (default ~/.agent-board)")
 	dbFlag := fs.String("db", "", "sqlite path (default <data>/board.db)")
-	tokenFlag := fs.String("token", "", "bearer token (default: env BOARD_TOKEN or <data>/token)")
-	passFlag := fs.String("password", "", "web password (default: env BOARD_PASSWORD, or generated once)")
+	passFlag := fs.String("password", "", "web password (default: env BOARD_PASSWORD; generated on first start)")
 	secure := fs.Bool("secure-cookie", false, "set Secure on session cookie (behind HTTPS)")
 	fs.Parse(args)
 
@@ -66,80 +65,71 @@ func cmdServe(args []string) {
 	}
 	defer store.Close()
 
-	token := *tokenFlag
-	if token == "" {
-		token = os.Getenv("BOARD_TOKEN")
-	}
-	if token == "" {
-		if b, err := os.ReadFile(p.token); err == nil {
-			token = strings.TrimSpace(string(b))
-		}
-	}
-	if token == "" {
-		token, err = randomHex(32)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := os.WriteFile(p.token, []byte(token+"\n"), 0o600); err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	keyHex, err := store.metaGet("session_key")
-	if err != nil {
-		keyHex, err = randomHex(32)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := store.metaSet("session_key", keyHex); err != nil {
-			log.Fatal(err)
-		}
-	}
-	sessionKey, err := hex.DecodeString(keyHex)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	passHash, hashErr := store.metaGet("password_hash")
 	pass := *passFlag
 	if pass == "" {
 		pass = os.Getenv("BOARD_PASSWORD")
 	}
-	generated := ""
-	if pass != "" {
-		passHash = hashPassword(pass)
-		if err := store.metaSet("password_hash", passHash); err != nil {
-			log.Fatal(err)
-		}
-		os.Remove(p.password)
-	} else if hashErr == ErrNotFound {
-		generated, err = randomHex(8)
-		if err != nil {
-			log.Fatal(err)
-		}
-		passHash = hashPassword(generated)
-		if err := store.metaSet("password_hash", passHash); err != nil {
-			log.Fatal(err)
-		}
-		_ = os.WriteFile(p.password, []byte(generated+"\n"), 0o600)
+	generated, err := ensurePassword(store, pass)
+	if err != nil {
+		log.Fatal(err)
 	}
+	passHash, err := store.metaGet("password_hash")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 旧版本把口令明文写进文件；启动时顺手清掉。
+	os.Remove(p.legacyPassword)
 
 	fmt.Printf("agent-board %s\n", version)
 	fmt.Printf("  url:      http://%s\n", *addr)
 	fmt.Printf("  data:     %s\n", p.data)
 	fmt.Printf("  db:       %s\n", p.db)
-	fmt.Printf("  token:    %s\n", p.token)
-	if generated != "" {
-		fmt.Printf("  password: %s  (generated, saved to %s)\n", generated, p.password)
-	} else {
-		fmt.Printf("  password: %s\n", map[bool]string{true: "set via flag/env", false: "already set"}[pass != ""])
+	switch {
+	case generated != "":
+		fmt.Printf("  password: 首次启动口令 %s（只显示这一次，请记下）\n", generated)
+	case pass != "":
+		fmt.Printf("  password: 已按启动参数更新\n")
+	default:
+		fmt.Printf("  password: 已设置\n")
 	}
 
-	srv := NewServer(store, Config{Addr: *addr, Version: version, SecureCookie: *secure},
-		token, passHash, sessionKey)
+	srv := NewServer(store, Config{Addr: *addr, Version: version, SecureCookie: *secure,
+		LoginDelay: 250 * time.Millisecond}, passHash)
 	if err := srv.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// ensurePassword 保证库里有一份盐哈希口令。首次启动生成随机口令并返回它，
+// 调用方只该把它打到控制台一次；之后每次启动都复用库里的哈希。
+func ensurePassword(store *Store, provided string) (generated string, err error) {
+	existing, getErr := store.metaGet("password_hash")
+	if getErr != nil && getErr != ErrNotFound {
+		return "", getErr
+	}
+	if provided != "" {
+		if strings.TrimSpace(provided) == "" {
+			return "", fmt.Errorf("password cannot be blank")
+		}
+		if getErr == nil && verifyPassword(existing, provided) {
+			return "", nil
+		}
+		if err := store.metaSet("password_hash", hashPassword(provided)); err != nil {
+			return "", err
+		}
+		return "", store.DeleteAllSessions()
+	}
+	if getErr == nil {
+		return "", nil
+	}
+	generated, err = randomHex(10)
+	if err != nil {
+		return "", err
+	}
+	if err := store.metaSet("password_hash", hashPassword(generated)); err != nil {
+		return "", err
+	}
+	return generated, nil
 }
 
 func cmdPasswd(args []string) {
@@ -164,42 +154,19 @@ func cmdPasswd(args []string) {
 	if err := store.metaSet("password_hash", hashPassword(*pass)); err != nil {
 		log.Fatal(err)
 	}
-	os.Remove(p.password)
-	fmt.Println("password updated")
-}
-
-func cmdToken(args []string) {
-	fs := flag.NewFlagSet("token", flag.ExitOnError)
-	dataFlag := fs.String("data", "", "data directory")
-	tokenFlag := fs.String("token", "", "token to save")
-	fs.Parse(args)
-	if *tokenFlag != "" {
-		p, err := resolvePaths(*dataFlag, "")
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := os.WriteFile(p.token, []byte(*tokenFlag+"\n"), 0o600); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println(p.token)
-		return
-	}
-	p, err := resolvePaths(*dataFlag, "")
-	if err != nil {
+	if err := store.DeleteAllSessions(); err != nil {
 		log.Fatal(err)
 	}
-	if b, err := os.ReadFile(p.token); err == nil {
-		fmt.Print(string(b))
-		return
-	}
-	fmt.Fprintln(os.Stderr, "no token file; start the server once or pass --token")
-	os.Exit(1)
+	os.Remove(p.legacyPassword)
+	fmt.Println("password updated; existing sessions revoked")
 }
 
 func usage() {
 	fmt.Print(`agent-board — 本地 Agent 任务看板
 
-  agent-board serve [--addr 127.0.0.1:8765] [--password ...] [--token ...]
+  agent-board serve [--addr 127.0.0.1:8765] [--password ...]
+  agent-board login [--password ...]   # 保存会话，供 CLI / Agent 复用
+  agent-board logout
   agent-board task new --title "..." [--project ...] [--agent ...] [--column todo]
   agent-board task list [--json]
   agent-board task show T-1
@@ -220,10 +187,9 @@ func usage() {
   agent-board archive --yes        # 全部收进已完成，保留历史
   agent-board board                # 当前数量
   agent-board passwd --password NEW
-  agent-board token
   agent-board health
 
-环境变量：BOARD_URL（默认 http://127.0.0.1:8765）、BOARD_TOKEN、BOARD_DATA
+环境变量：BOARD_URL（默认 http://127.0.0.1:8765）、BOARD_PASSWORD、BOARD_DATA
 `)
 }
 
@@ -273,8 +239,10 @@ func main() {
 		cmdBoard(os.Args[2:])
 	case "passwd":
 		cmdPasswd(os.Args[2:])
-	case "token":
-		cmdToken(os.Args[2:])
+	case "login":
+		cmdLogin(os.Args[2:])
+	case "logout":
+		cmdLogout(os.Args[2:])
 	case "health":
 		cmdHealth(os.Args[2:])
 	case "version":

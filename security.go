@@ -8,11 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func randomHex(n int) (string, error) {
@@ -85,25 +83,16 @@ func verifyPassword(encoded, pw string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-func signSession(key []byte, exp int64) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(strconv.FormatInt(exp, 10)))
-	return fmt.Sprintf("%d.%s", exp, hex.EncodeToString(mac.Sum(nil)))
+// sessionToken 是交给浏览器的随机会话标识；数据库只存它的哈希。
+func sessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-func verifySession(key []byte, v string) bool {
-	parts := strings.SplitN(v, ".", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	exp, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || time.Now().Unix() > exp {
-		return false
-	}
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(parts[0]))
-	want := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(parts[1]), []byte(want))
+func sessionHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
-
-var errUnauthorized = errors.New("unauthorized")

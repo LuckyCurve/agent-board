@@ -1,5 +1,5 @@
-const CACHE = 'agent-board-v2';
-const SHELL = ['/', '/app.css', '/app.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'agent-board-v3';
+const SHELL = ['/app.css', '/app.js', '/login.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -16,7 +16,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  if (url.pathname.startsWith('/api/') || url.pathname === '/auth') return;
+  // 页面受登录保护：不缓存 HTML，离线也不把看板内容留在共享浏览器里。
+  if (e.request.mode === 'navigate' || url.pathname.startsWith('/api/')) return;
 
   e.respondWith(
     fetch(e.request)
@@ -27,6 +28,6 @@ self.addEventListener('fetch', e => {
         }
         return res;
       })
-      .catch(() => caches.match(e.request).then(r => r || caches.match('/')))
+      .catch(() => caches.match(e.request))
   );
 });

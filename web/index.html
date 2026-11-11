@@ -48,6 +48,9 @@
   <div class="topbar-right">
     <span class="live" id="live" title="实时更新"><span class="live-dot"></span><span class="live-text">实时</span></span>
     <button class="icon-btn" id="themeToggle" aria-label="切换深浅色" title="切换深浅色"></button>
+    <button class="icon-btn" id="logoutBtn" aria-label="退出登录" title="退出登录">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h9"/></svg>
+    </button>
   </div>
 </header>
 
@@ -139,26 +142,6 @@
     </div>
   </div>
 </dialog>
-
-<div class="login-layer" id="login" hidden>
-  <form class="login-card" id="loginForm">
-    <div class="login-brand">
-      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="2.5" y="3" width="5" height="18" rx="2" fill="currentColor"/>
-        <rect x="9.5" y="3" width="5" height="12" rx="2" fill="currentColor" opacity=".7"/>
-        <rect x="16.5" y="3" width="5" height="15" rx="2" fill="currentColor" opacity=".44"/>
-      </svg>
-      <span>Agent Board</span>
-    </div>
-    <p class="login-sub">输入口令，查看任务与待拍板</p>
-    <label class="field">
-      <span>口令</span>
-      <input type="password" id="loginInput" autocomplete="current-password" inputmode="text" required>
-    </label>
-    <p class="login-error" id="loginError" role="alert"></p>
-    <button class="btn primary" type="submit">进入</button>
-  </form>
-</div>
 
 <script src="/app.js" defer></script>
 </body>

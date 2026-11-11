@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -18,13 +16,13 @@ import (
 var testPassHash = hashPassword("test-pw")
 
 type testEnv struct {
-	store *Store
-	srv   *Server
-	ts    *httptest.Server
-	token string
+	store  *Store
+	srv    *Server
+	ts     *httptest.Server
+	client *http.Client
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+func newTestServer(t *testing.T, cfg Config, passHash string) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := OpenStore(filepath.Join(dir, "board.db"))
@@ -33,11 +31,20 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	s := NewServer(st, Config{Addr: "127.0.0.1:0", Version: "test"},
-		"test-token", testPassHash, []byte("0123456789abcdef0123456789abcdef"))
+	if cfg.Addr == "" {
+		cfg.Addr = "127.0.0.1:0"
+	}
+	s := NewServer(st, cfg, passHash)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	return &testEnv{store: st, srv: s, ts: ts, token: "test-token"}
+	return &testEnv{store: st, srv: s, ts: ts}
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	e := newTestServer(t, Config{Version: "test"}, testPassHash)
+	e.client = loginWithJar(t, e.ts.URL, "test-pw")
+	return e
 }
 
 func (e *testEnv) req(t *testing.T, method, path string, body any) (int, map[string]any, *http.Response) {
@@ -54,8 +61,7 @@ func (e *testEnv) req(t *testing.T, method, path string, body any) (int, map[str
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Authorization", "Bearer "+e.token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,81 +90,6 @@ func (e *testEnv) addEvent(t *testing.T, taskID, kind, text, key string) map[str
 		t.Fatalf("add event: %d %v", code, body)
 	}
 	return body["event"].(map[string]any)
-}
-
-func TestAuthRequiredLoginAndCookie(t *testing.T) {
-	e := newTestEnv(t)
-
-	resp, err := http.Get(e.ts.URL + "/api/tasks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("no token: got %d want 401", resp.StatusCode)
-	}
-
-	code, _, _ := e.req(t, "GET", "/api/tasks", nil)
-	if code != http.StatusOK {
-		t.Fatalf("bearer token: got %d want 200", code)
-	}
-
-	// 错口令与对的口令
-	post := func(pw string) *http.Response {
-		b, _ := json.Marshal(map[string]string{"password": pw})
-		r, err := http.Post(e.ts.URL+"/api/login", "application/json", bytes.NewReader(b))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return r
-	}
-	bad := post("nope")
-	bad.Body.Close()
-	if bad.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong password: got %d want 401", bad.StatusCode)
-	}
-	ok := post("test-pw")
-	ok.Body.Close()
-	if ok.StatusCode != http.StatusOK {
-		t.Fatalf("login: got %d want 200", ok.StatusCode)
-	}
-	jar, _ := cookiejar.New(nil)
-	jar.SetCookies(mustURL(t, e.ts.URL), ok.Cookies())
-	cl := &http.Client{Jar: jar}
-	r, err := cl.Get(e.ts.URL + "/api/me")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.Body.Close()
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("cookie session: got %d want 200", r.StatusCode)
-	}
-
-	// token 换 cookie
-	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	r2, err := noFollow.Get(e.ts.URL + "/auth?token=test-token&next=/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r2.Body.Close()
-	if r2.StatusCode != http.StatusSeeOther {
-		t.Fatalf("auth query: got %d want 303", r2.StatusCode)
-	}
-	if len(r2.Cookies()) == 0 {
-		t.Fatal("auth query did not set session cookie")
-	}
-
-	// next 只允许站内路径
-	r3, err := noFollow.Get(e.ts.URL + "/auth?token=test-token&next=https://evil.example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r3.Body.Close()
-	if loc := r3.Header.Get("Location"); loc != "/" {
-		t.Fatalf("open redirect: got %q want /", loc)
-	}
 }
 
 func TestTaskEventAndIdempotency(t *testing.T) {
@@ -422,20 +353,22 @@ func TestBoardArchiveMovesToDoneAndDismissesDecisions(t *testing.T) {
 
 func TestStaticAssets(t *testing.T) {
 	e := newTestEnv(t)
-	for _, p := range []string{"/", "/app.css", "/app.js", "/manifest.webmanifest", "/sw.js"} {
-		resp, err := http.Get(e.ts.URL + p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
+	anon := noRedirectClient()
+	for _, p := range []string{"/app.css", "/app.js", "/manifest.webmanifest", "/sw.js"} {
+		resp := get(t, anon, e.ts.URL+p, nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s: %d", p, resp.StatusCode)
 		}
-		if p == "/" || strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".js") {
-			if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
-				t.Fatalf("%s cache-control = %q", p, cc)
-			}
+		if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s cache-control = %q", p, cc)
 		}
+	}
+	resp := get(t, e.client, e.ts.URL+"/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/: %d", resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("/ cache-control = %q", cc)
 	}
 }
 

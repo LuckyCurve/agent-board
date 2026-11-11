@@ -101,7 +101,8 @@ async function api(path, { method = 'GET', body } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) {
-    showLogin(true);
+    const next = location.pathname + location.hash;
+    location.replace('/login?next=' + encodeURIComponent(next));
     throw new Error('unauthorized');
   }
   const data = await res.json().catch(() => ({}));
@@ -650,38 +651,7 @@ function taskFromHash() {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-/* ---------- login / theme ---------- */
-
-function showLogin(show) {
-  const el = $('#login');
-  if (!el) return;
-  el.hidden = !show;
-  if (show) setTimeout(() => $('#loginInput') && $('#loginInput').focus(), 50);
-}
-
-async function doLogin(e) {
-  e.preventDefault();
-  const input = $('#loginInput');
-  const err = $('#loginError');
-  err.textContent = '';
-  try {
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: input.value }),
-    });
-    if (!res.ok) {
-      err.textContent = '口令不对，再试一次';
-      input.select();
-      return;
-    }
-    input.value = '';
-    showLogin(false);
-    await boot({ keepUI: true });
-  } catch (e) {
-    err.textContent = '连接失败，检查服务是否在运行';
-  }
-}
+/* ---------- theme ---------- */
 
 const SUN = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7"/></svg>';
 const MOON = '<svg viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>';
@@ -753,7 +723,6 @@ async function boot({ keepUI } = {}) {
   installViewport();
   try {
     await Promise.all([refreshTasks(), refreshDecisions()]);
-    showLogin(false);
     const v = viewFromHash();
     setView(v, true);
     if (v === 'inbox') await refreshFreeReplies();
@@ -777,7 +746,12 @@ function bindUI() {
   bound = true;
 
   $('#themeToggle').addEventListener('click', toggleTheme);
-  $('#loginForm').addEventListener('submit', doLogin);
+  $('#logoutBtn').addEventListener('click', async () => {
+    try {
+      await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+    } catch (_) {}
+    location.replace('/login');
+  });
   $('#sheetClose').addEventListener('click', closeSheet);
 
   $$('.tab, .bnav-item').forEach(b => {

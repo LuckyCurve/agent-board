@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f3efe6">
+<meta name="robots" content="noindex">
+<title>登录 · Agent Board</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script>
+(function () {
+  try {
+    var q = new URLSearchParams(location.search).get('theme');
+    var saved = q || localStorage.getItem('ab-theme');
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    if (q) localStorage.setItem('ab-theme', q);
+    if (dark) document.documentElement.classList.add('dark-theme');
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+<main class="login-layer">
+  <form class="login-card" id="loginForm">
+    <div class="login-brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2.5" y="3" width="5" height="18" rx="2" fill="currentColor"/>
+        <rect x="9.5" y="3" width="5" height="12" rx="2" fill="currentColor" opacity=".7"/>
+        <rect x="16.5" y="3" width="5" height="15" rx="2" fill="currentColor" opacity=".44"/>
+      </svg>
+      <span>Agent Board</span>
+    </div>
+    <p class="login-sub">输入启动时显示的口令</p>
+    <label class="field">
+      <span>口令</span>
+      <input type="password" id="loginInput" autocomplete="current-password" inputmode="text" required autofocus>
+    </label>
+    <p class="login-error" id="loginError" role="alert"></p>
+    <button class="btn primary" type="submit">进入</button>
+  </form>
+</main>
+<script src="/login.js" defer></script>
+</body>
+</html>

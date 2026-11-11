@@ -154,6 +154,12 @@ CREATE TABLE IF NOT EXISTS replies (
 );
 CREATE INDEX IF NOT EXISTS idx_replies_task ON replies(task_id, seq);
 CREATE INDEX IF NOT EXISTS idx_replies_status ON replies(status, updated_at);
+CREATE TABLE IF NOT EXISTS sessions (
+  id_hash TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 `)
 	return err
 }
@@ -179,6 +185,44 @@ func (s *Store) metaGet(k string) (string, error) {
 func (s *Store) metaSet(k, v string) error {
 	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES(?,?)
 		ON CONFLICT(k) DO UPDATE SET v=excluded.v`, k, v)
+	return err
+}
+
+// ---- sessions ----
+
+func (s *Store) CreateSession(token string, ttl time.Duration) error {
+	if token == "" {
+		return errors.New("empty session token")
+	}
+	now := time.Now()
+	if _, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at <= ?`, now.Unix()); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO sessions(id_hash, created_at, expires_at) VALUES(?,?,?)
+		ON CONFLICT(id_hash) DO UPDATE SET created_at=excluded.created_at, expires_at=excluded.expires_at`,
+		sessionHash(token), now.UTC().Format(time.RFC3339Nano), now.Add(ttl).Unix())
+	return err
+}
+
+func (s *Store) SessionValid(token string) bool {
+	if token == "" {
+		return false
+	}
+	var exp int64
+	err := s.db.QueryRow(`SELECT expires_at FROM sessions WHERE id_hash=?`, sessionHash(token)).Scan(&exp)
+	return err == nil && time.Now().Unix() < exp
+}
+
+func (s *Store) DeleteSession(token string) error {
+	if token == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE id_hash=?`, sessionHash(token))
+	return err
+}
+
+func (s *Store) DeleteAllSessions() error {
+	_, err := s.db.Exec(`DELETE FROM sessions`)
 	return err
 }
 

@@ -15,23 +15,28 @@ go build -o agent-board.exe .
 ./agent-board.exe serve
 ```
 
-首次启动会在 `~/.agent-board/` 生成：
+首次启动会在 `~/.agent-board/` 生成 `board.db`（全部数据）。没有口令时会在控制台生成一个，**只显示这一次**；下次启动沿用库里存的加盐哈希。
 
-| 文件 | 用途 |
-|---|---|
-| `board.db` | 全部数据（WAL） |
-| `token` | CLI / Agent 用的 Bearer token |
-| `password.txt` | 网页登录口令，仅首次生成时写一次 |
+```bash
+# 自己指定口令（也可用 BOARD_PASSWORD）
+./agent-board.exe serve --password '你的口令'
+# 丢了口令
+./agent-board.exe passwd --password '新口令'
+```
 
-改口令：`./agent-board.exe passwd --password 新口令`（重启后生效）。
 换端口/数据目录：`serve --addr 127.0.0.1:9000 --data D:/board`。
+除登录页和静态资源外，页面与接口都要求登录；登录失败每分钟最多 5 次。
 手机访问要自己把监听地址改成局域网地址，并确认只在内网暴露。
 iOS Safari / Android Chrome 打开后可「添加到主屏幕」，按独立 App 使用，支持深色模式。
 
 ## CLI
 
+CLI 先登录一次，把会话存在 `~/.agent-board/session`；也可以用 `BOARD_PASSWORD` 让每条命令自动登录。
+
 ```bash
-export BOARD_TOKEN=$(cat ~/.agent-board/token)
+export BOARD_PASSWORD='你的口令'
+agent-board login
+agent-board logout
 
 agent-board task new --title "把导出层改成流式写入" --project 财富 --agent "wealth 开发"
 agent-board progress T-1 "42 项单测全过，内存峰值 1.2G → 180M" --agent "wealth 开发"
@@ -74,7 +79,7 @@ agent-board reset --yes     # 清空所有数据，编号回到 T-1 / D-1
 
 ## HTTP
 
-所有 `/api/*` 要 `Authorization: Bearer <token>`，或浏览器登录后的会话 cookie。
+所有 `/api/*` 都要登录后的会话 cookie（`agent-board login` 或浏览器登录）。没有 Bearer token 旁路。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

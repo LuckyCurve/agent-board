@@ -1,14 +1,15 @@
 package main
 
 import (
-	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
 	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -26,18 +27,27 @@ type Config struct {
 	Addr         string
 	Version      string
 	SecureCookie bool
+	// LoginLimit / LoginWindow 控制同一来源连续输错的放行上限；0 用默认 5 次/分钟。
+	LoginLimit  int
+	LoginWindow time.Duration
+	// LoginDelay 是每次失败后的固定延迟，用来抹平「出错快、成功慢」的时间差。
+	LoginDelay time.Duration
 }
 
 type Server struct {
-	store      *Store
-	cfg        Config
-	token      string
-	passHash   string
-	sessionKey []byte
+	store     *Store
+	cfg       Config
+	passHash  string
+	loginRate *loginLimiter
 }
 
-func NewServer(store *Store, cfg Config, token, passHash string, sessionKey []byte) *Server {
-	return &Server{store: store, cfg: cfg, token: token, passHash: passHash, sessionKey: sessionKey}
+func NewServer(store *Store, cfg Config, passHash string) *Server {
+	return &Server{
+		store:     store,
+		cfg:       cfg,
+		passHash:  passHash,
+		loginRate: newLoginLimiter(cfg.LoginLimit, cfg.LoginWindow),
+	}
 }
 
 func (s *Server) Run() error {
@@ -53,10 +63,10 @@ func (s *Server) Run() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
-	mux.HandleFunc("GET /auth", s.handleAuthQuery)
+	mux.HandleFunc("GET /login", s.handleLoginPage)
 
+	mux.HandleFunc("GET /api/health", s.authed(s.handleHealth))
 	mux.HandleFunc("GET /api/me", s.authed(s.handleMe))
 	mux.HandleFunc("POST /api/logout", s.authed(s.handleLogout))
 	mux.HandleFunc("POST /api/board/reset", s.authed(s.handleBoardReset))
@@ -85,7 +95,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stream", s.authed(s.handleStream))
 	mux.HandleFunc("GET /api/activity", s.authed(s.handleActivity))
 
-	mux.HandleFunc("GET /", s.handleStatic)
+	// 未登记的 API 也不给匿名探测的机会。
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		if !s.isAuthed(r) {
+			writeErr(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		writeErr(w, http.StatusNotFound, "not found")
+	})
+
+	mux.HandleFunc("/", s.handleStatic)
 
 	return s.withHeaders(mux)
 }
@@ -99,26 +118,34 @@ func (s *Server) withHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
 				"script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			h.Set("Cache-Control", "no-store")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
 // ---- auth ----
 
+const (
+	loginError   = "口令不对"
+	loginLimited = "尝试过于频繁，稍后再试"
+)
+
+func (s *Server) sessionToken(r *http.Request) (string, bool) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	if !s.store.SessionValid(c.Value) {
+		return "", false
+	}
+	return c.Value, true
+}
+
 func (s *Server) isAuthed(r *http.Request) bool {
-	if s.token != "" {
-		ah := r.Header.Get("Authorization")
-		if strings.HasPrefix(ah, "Bearer ") {
-			got := strings.TrimSpace(strings.TrimPrefix(ah, "Bearer "))
-			if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1 {
-				return true
-			}
-		}
-	}
-	if c, err := r.Cookie(sessionCookie); err == nil && verifySession(s.sessionKey, c.Value) {
-		return true
-	}
-	return false
+	_, ok := s.sessionToken(r)
+	return ok
 }
 
 func (s *Server) authed(fn http.HandlerFunc) http.HandlerFunc {
@@ -131,11 +158,10 @@ func (s *Server) authed(fn http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) setSession(w http.ResponseWriter) {
-	exp := time.Now().Add(sessionTTL).Unix()
+func (s *Server) setSession(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    signSession(s.sessionKey, exp),
+		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -144,49 +170,86 @@ func (s *Server) setSession(w http.ResponseWriter) {
 	})
 }
 
+func (s *Server) clearSession(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.SecureCookie,
+		MaxAge:   -1,
+	})
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	ip := clientIP(r)
+	if blocked, wait := s.loginRate.status(ip); blocked {
+		secs := int(wait.Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeErr(w, http.StatusTooManyRequests, loginLimited)
+		return
+	}
+
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
 	if !verifyPassword(s.passHash, req.Password) {
-		time.Sleep(300 * time.Millisecond)
-		writeErr(w, http.StatusUnauthorized, "wrong password")
+		s.loginRate.fail(ip)
+		if s.cfg.LoginDelay > 0 {
+			time.Sleep(s.cfg.LoginDelay)
+		}
+		writeErr(w, http.StatusUnauthorized, loginError)
 		return
 	}
-	s.setSession(w)
+	token, err := sessionToken()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if err := s.store.CreateSession(token, sessionTTL); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.loginRate.reset(ip)
+	s.setSession(w, token)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// GET /auth?token=... 用 Bearer token 换一个浏览器会话，方便手机第一次打开。
-func (s *Server) handleAuthQuery(w http.ResponseWriter, r *http.Request) {
-	tok := r.URL.Query().Get("token")
-	if s.token == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if s.isAuthed(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.setSession(w)
-	next := r.URL.Query().Get("next")
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		next = "/"
-	}
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	s.servePage(w, "login.html")
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	if token, ok := s.sessionToken(r); ok {
+		_ = s.store.DeleteSession(token)
+	}
+	s.clearSession(w)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	mode := "cookie"
-	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		mode = "token"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": mode, "version": s.cfg.Version})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "cookie", "version": s.cfg.Version})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -697,7 +760,44 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 
 // ---- static ----
 
+func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.RequestURI()
+	http.Redirect(w, r, "/login?next="+url.QueryEscape(next), http.StatusSeeOther)
+}
+
+func isStaticAsset(p string) bool {
+	switch path.Ext(p) {
+	case ".css", ".js", ".png", ".svg", ".ico", ".webmanifest":
+		return true
+	}
+	return p == "favicon.ico"
+}
+
+func webFile(name string) ([]byte, error) {
+	sub, err := fs.Sub(webRoot, "web")
+	if err != nil {
+		return nil, err
+	}
+	return fs.ReadFile(sub, name)
+}
+
+func (s *Server) servePage(w http.ResponseWriter, name string) {
+	b, err := webFile(name)
+	if err != nil {
+		http.Error(w, "404 page not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(b)
+}
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	if p == "" {
 		p = "index.html"
@@ -706,12 +806,24 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	sub, err := fs.Sub(webRoot, "web")
-	if err != nil {
-		http.Error(w, "internal error", 500)
+	if p == "index.html" || p == "login.html" {
+		if p == "index.html" && !s.isAuthed(r) {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.servePage(w, p)
 		return
 	}
-	b, err := fs.ReadFile(sub, p)
+	if !isStaticAsset(p) {
+		if !s.isAuthed(r) {
+			s.redirectToLogin(w, r)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+
+	b, err := webFile(p)
 	if err != nil {
 		http.NotFound(w, r)
 		return
