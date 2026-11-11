@@ -1,0 +1,30 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: agent-board-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 部署到云服务器
+        env:
+          DEPLOY_KEY: ${{ secrets.AGENT_BOARD_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+              root@43.165.128.180 /usr/local/bin/agent-board-deploy.sh
