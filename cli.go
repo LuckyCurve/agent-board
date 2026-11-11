@@ -422,8 +422,17 @@ func cmdWatch(args []string) {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	consumer := fs.String("consumer", "main", "consumer name")
 	sinceFlag := fs.Int64("since", -1, "start seq (default: server acked_seq)")
+	waitFlag := fs.Int("wait", 50, "long-poll timeout in seconds")
 	fs.Parse(args)
 	c := mustClient()
+
+	wait := *waitFlag
+	if wait < 5 {
+		wait = 5
+	}
+	if wait > 60 {
+		wait = 60
+	}
 
 	since := *sinceFlag
 	if since < 0 {
@@ -442,8 +451,8 @@ func cmdWatch(args []string) {
 			Events []Event `json:"events"`
 			Next   int64   `json:"next"`
 		}
-		path := fmt.Sprintf("/api/events?since=%d&wait=50&consumer=%s", since, url.QueryEscape(*consumer))
-		code, b, err := c.raw("GET", path, nil, 70*time.Second)
+		path := fmt.Sprintf("/api/events?since=%d&wait=%d&consumer=%s", since, wait, url.QueryEscape(*consumer))
+		code, b, err := c.raw("GET", path, nil, time.Duration(wait+20)*time.Second)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "watch: %v\n", err)
 			time.Sleep(3 * time.Second)
