@@ -1,5 +1,6 @@
 // 正文链接识别：只认 http(s) 和 #task=T-N，其余一律当纯文本。
 // 单独成文件是为了能在 Node 里直接测（app.js 一加载就要 DOM）。
+/* global module */
 (function (root) {
   'use strict';
 
