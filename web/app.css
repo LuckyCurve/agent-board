@@ -438,6 +438,33 @@ svg { display: block; }
 
 .inbox { display: flex; flex-direction: column; gap: 12px; max-width: 780px; }
 
+/* 收件箱按 IM 布局：消息区滚动，输入框钉在底部。 */
+body[data-view="inbox"] { overflow: hidden; }
+body[data-view="inbox"] .main {
+  height: calc(100dvh - var(--topbar-h) - var(--kb, 0px));
+  display: flex;
+  padding-bottom: 20px;
+  overflow: hidden;
+}
+body[data-view="inbox"] #view-inbox:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+body[data-view="inbox"] #view-inbox .page-head { flex: none; }
+body[data-view="inbox"] .inbox { flex: 1; min-height: 0; width: 100%; gap: 10px; }
+.inbox-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 8px;
+  scrollbar-gutter: stable;
+}
+body[data-view="inbox"] .free-compose { flex: none; margin-bottom: 0; }
+
 .decision-card {
   background: var(--surface);
   border: 1px solid var(--border-soft);
@@ -997,16 +1024,23 @@ dialog.sheet:not([open]) { display: none; }
   padding: 11px 6px;
   outline: none;
 }
-.msg-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.msg-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .msg-item {
+  max-width: min(78%, 560px);
   background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: 11px;
   padding: 12px 14px;
 }
 .msg-item.agent {
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+}
+.msg-item:not(.agent) {
+  align-self: flex-end;
   background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+  border-bottom-right-radius: 4px;
 }
 .msg-who {
   margin-bottom: 5px;
@@ -1015,6 +1049,7 @@ dialog.sheet:not([open]) { display: none; }
   letter-spacing: .06em;
 }
 .msg-item.agent .msg-who { color: var(--accent); font-weight: 600; }
+.msg-item:not(.agent) .msg-who { text-align: right; }
 .msg-text { font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-foot {
   display: flex;
@@ -1024,7 +1059,7 @@ dialog.sheet:not([open]) { display: none; }
   margin-top: 7px;
 }
 .msg-foot time { font-size: 10.5px; color: var(--faint); font-family: var(--font-mono); }
-.msg-empty { color: var(--faint); font-size: 12px; padding: 14px 2px; }
+.msg-empty { align-self: center; color: var(--faint); font-size: 12px; padding: 14px 2px; }
 
 .dc-task {
   display: inline-flex;
@@ -1276,6 +1311,9 @@ dialog.sheet:not([open]) { display: none; }
   }
 
   .main { padding: 18px 16px calc(88px + env(safe-area-inset-bottom)); }
+  body[data-view="inbox"] .main { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
+  body[data-view="inbox"].kb-open .main { padding-bottom: 10px; }
+  body[data-view="inbox"] .inbox { max-width: none; }
   .page-head { margin-bottom: 18px; padding-bottom: 12px; }
   .page-head h1 { font-size: 24px; }
 

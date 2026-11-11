@@ -28,6 +28,16 @@ let draftText = '';
 let freeDraft = '';
 let refreshTimer = null;
 let es = null;
+let chatPinned = true;     // 消息流是否贴着底部；用户往上翻时关闭
+
+function chatNearBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= 60;
+}
+
+function scrollChatBottom() {
+  const sc = $('#inboxScroll');
+  if (sc) sc.scrollTop = sc.scrollHeight;
+}
 
 /* ---------- utils ---------- */
 
@@ -481,6 +491,7 @@ async function sendFreeMessage(text) {
     await api('/api/message', { method: 'POST', body: { text, key: uid() } });
     // 先清掉草稿和当前框里的字，刷新后 renderInbox 才不会把旧内容填回去。
     freeDraft = '';
+    chatPinned = true;
     const sent = $('#freeInput');
     if (sent) { sent.value = ''; autogrow(sent); }
     toast('已发出，主会话已接到');
@@ -536,6 +547,8 @@ function messageHTML(r) {
 function renderInbox() {
   const el = $('#inbox');
   if (!el) return;
+  const oldScroll = $('#inboxScroll');
+  const oldTop = oldScroll ? oldScroll.scrollTop : 0;
   const freeInput = $('#freeInput');
   if (freeInput) freeDraft = freeInput.value;
 
@@ -545,24 +558,37 @@ function renderInbox() {
     : `<div class="empty"><svg viewBox="0 0 24 24"><path d="M4 13.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7.5"/><path d="M4 13.5h4.2l1.4 2.2h4.8l1.4-2.2H20V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
         <div class="e-title">没有待拍板项</div><div class="e-sub">需要你决定的事会出现在这里</div></div>`;
 
-  const msgs = state.freeReplies;
+  // 接口按新到旧返回；聊天流按 IM 习惯旧在上、新在下。
+  const msgs = state.freeReplies.slice().reverse();
   el.innerHTML = `
-    <section class="inbox-section">
-      <h2 class="sec-h">待拍板 <span>${pending.length}</span></h2>
-      ${decisionsHTML}
-    </section>
-    <section class="inbox-section">
-      <h2 class="sec-h">跟主会话说一句</h2>
-      <form class="free-compose" id="freeForm">
-        <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="不用挂任务，直接发…">${esc(freeDraft)}</textarea>
-        <button class="send-btn" type="submit" aria-label="发送">
-          <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
-        </button>
-      </form>
-      <ul class="msg-list">${msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>'}</ul>
-    </section>`;
+    <div class="inbox-scroll" id="inboxScroll">
+      <section class="inbox-section">
+        <h2 class="sec-h">待拍板 <span>${pending.length}</span></h2>
+        ${decisionsHTML}
+      </section>
+      <section class="inbox-section chat-section">
+        <h2 class="sec-h">跟主会话说一句</h2>
+        <ul class="msg-list" id="msgList">${msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>'}</ul>
+      </section>
+    </div>
+    <form class="free-compose" id="freeForm">
+      <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="不用挂任务，直接发…">${esc(freeDraft)}</textarea>
+      <button class="send-btn" type="submit" aria-label="发送">
+        <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+      </button>
+    </form>`;
   const fi = $('#freeInput');
   if (fi) autogrow(fi);
+
+  const sc = $('#inboxScroll');
+  if (sc) {
+    sc.addEventListener('scroll', () => { chatPinned = chatNearBottom(sc); }, { passive: true });
+    // 默认贴底；用户翻历史时保留原来的位置，不被新消息拽走。
+    requestAnimationFrame(() => {
+      if (chatPinned) sc.scrollTop = sc.scrollHeight;
+      else sc.scrollTop = oldTop;
+    });
+  }
 }
 
 /* ---------- calendar ---------- */
@@ -641,6 +667,8 @@ function renderCalendar() {
 function setView(v, fromHash) {
   if (!['board', 'inbox', 'calendar'].includes(v)) v = 'board';
   state.view = v;
+  document.body.dataset.view = v;
+  if (v === 'inbox') chatPinned = true;
   if (!fromHash) {
     const target = v === 'board' ? location.pathname : '#' + v;
     if (v === 'board') history.replaceState(null, '', location.pathname);
@@ -725,6 +753,9 @@ function installViewport() {
   const apply = () => {
     const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
     document.documentElement.style.setProperty('--kb', kb + 'px');
+    document.body.classList.toggle('kb-open', kb > 0);
+    // 键盘改变可视高度后，仍贴底的消息流要跟着贴回去。
+    if (chatPinned) requestAnimationFrame(scrollChatBottom);
   };
   vv.addEventListener('resize', apply);
   vv.addEventListener('scroll', apply);
