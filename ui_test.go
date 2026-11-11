@@ -65,7 +65,9 @@ func TestPushButtonHiddenUntilSupported(t *testing.T) {
 	if !strings.Contains(body, `id="pushToggle"`) {
 		t.Fatal("push toggle missing")
 	}
-	if !strings.Contains(body, `aria-pressed="false" hidden`) {
+	// JS 只在安全上下文里把它露出来（通知需要 HTTPS / localhost）。
+	js := getPageBody(t, e, "/app.js")
+	if !strings.Contains(js, "btn.hidden = !pushSupported()") {
 		t.Fatal("push toggle should start hidden; JS reveals it only in a secure context")
 	}
 }
@@ -86,6 +88,44 @@ func TestInboxHeightIsFlexNotCalc(t *testing.T) {
 	}
 	if strings.Contains(css, "height: calc(100dvh - var(--topbar-h)") {
 		t.Fatal("对话页高度别再手减顶栏，筛选项会把输入框推到导航底下")
+	}
+}
+
+// 顶栏只留一个「设置」入口；测试消息、立即更新这类低频动作不再占位置。
+func TestTopbarHasSingleSettingsEntry(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	if !strings.Contains(body, `id="settingsBtn"`) || !strings.Contains(body, `id="settingsMenu"`) {
+		t.Fatal("顶栏应该只有一个「设置」入口，点开是下拉菜单")
+	}
+	for _, gone := range []string{`id="pushTest"`, `id="deployBtn"`, "发一条测试通知", "立即更新"} {
+		if strings.Contains(body, gone) {
+			t.Fatalf("顶栏不该再有 %s", gone)
+		}
+	}
+	for _, want := range []string{`id="pushToggle"`, `id="themeToggle"`, `id="logoutBtn"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("设置下拉里应该有 %s", want)
+		}
+	}
+	// 下拉默认收起，点开才展开。
+	if !strings.Contains(body, `id="settingsMenu" hidden`) {
+		t.Fatal("设置下拉默认应该是收起的")
+	}
+}
+
+// Agent 切换器常驻筛选行，不再在顶栏和筛选行之间来回搬家。
+func TestAgentSwitchLivesInFilterBar(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	bar := strings.Index(body, `id="filterBar"`)
+	sel := strings.Index(body, `id="agentSwitch"`)
+	if bar < 0 || sel < bar {
+		t.Fatal("Agent 切换器应该固定在筛选行里")
+	}
+	js := getPageBody(t, e, "/app.js")
+	if strings.Contains(js, "placeAgentSwitch") {
+		t.Fatal("切换器不该再按屏宽搬家")
 	}
 }
 

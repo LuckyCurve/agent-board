@@ -12,7 +12,6 @@
 <meta name="format-detection" content="telephone=no">
 <title>Agent Board</title>
 <!-- api-token -->
-<!-- deploy-support -->
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-180.png">
@@ -49,32 +48,37 @@
   </nav>
 
   <div class="topbar-right">
-    <span class="agent-slot" id="topbarAgentSlot">
-      <select id="agentSwitch" class="agent-select" aria-label="按 Agent 过滤">
-        <option value="">全部 Agent</option>
-      </select>
-    </span>
     <span class="live" id="live" title="实时更新"><span class="live-dot"></span><span class="live-text">实时</span></span>
-    <button class="icon-btn push-off" id="pushToggle" aria-label="开启通知" title="开启通知" aria-pressed="false" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg>
-    </button>
-    <button class="icon-btn" id="pushTest" aria-label="发一条测试通知" title="发一条测试通知">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3L10.5 13.5"/><path d="M21 3l-6.5 18-4-8-8-4 18.5-6z"/></svg>
-    </button>
-    <button class="icon-btn" id="themeToggle" aria-label="切换深浅色" title="切换深浅色"></button>
-    <button class="icon-btn" id="deployBtn" aria-label="立即更新" title="立即更新" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M5 20h14"/></svg>
-    </button>
-    <button class="icon-btn" id="logoutBtn" aria-label="退出登录" title="退出登录">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h9"/></svg>
-    </button>
+    <div class="settings-wrap">
+      <button class="icon-btn" id="settingsBtn" aria-label="设置" title="设置" aria-haspopup="true" aria-expanded="false" aria-controls="settingsMenu">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.1.4.44.74.87.94.3.13.63.2.96.2H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+      <div class="settings-menu" id="settingsMenu" hidden role="menu" aria-label="设置">
+        <button class="sm-item" id="pushToggle" role="menuitem" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg>
+          <span class="sm-text">通知</span>
+          <span class="sm-state" id="pushState">关</span>
+        </button>
+        <button class="sm-item" id="themeToggle" role="menuitem">
+          <span class="sm-icon" id="themeIcon"></span>
+          <span class="sm-text">深浅色</span>
+          <span class="sm-state" id="themeState"></span>
+        </button>
+        <button class="sm-item" id="logoutBtn" role="menuitem">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h9"/></svg>
+          <span class="sm-text">退出登录</span>
+        </button>
+      </div>
+    </div>
   </div>
 </header>
 
 <div class="filterbar" id="filterBar">
   <div class="fb-tags" id="tagRow"></div>
   <div class="fb-side">
-    <span class="agent-slot" id="filterAgentSlot"></span>
+    <select id="agentSwitch" class="agent-select" aria-label="按 Agent 过滤">
+      <option value="">全部 Agent</option>
+    </select>
     <button class="btn ghost tiny" id="clearFilter" hidden>清除筛选</button>
   </div>
 </div>

@@ -383,13 +383,7 @@ async function refreshAgents() {
   renderCalAgents();
 }
 
-// 切换器放在哪儿：宽屏在顶栏，窄屏挪到筛选行。
-function placeAgentSwitch() {
-  const sel = $('#agentSwitch');
-  if (!sel) return;
-  const target = window.innerWidth >= 900 ? $('#topbarAgentSlot') : $('#filterAgentSlot');
-  if (target && sel.parentElement !== target) target.appendChild(sel);
-}
+// Agent 切换器就在筛选行，跟标签筛选放一起；窄屏也不用挪。
 
 /* ---------- board ---------- */
 
@@ -1364,12 +1358,30 @@ function setTheme(dark) {
   try { localStorage.setItem('ab-theme', dark ? 'dark' : 'light'); } catch (_) {}
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', dark ? '#15130f' : '#f3efe6');
-  const btn = $('#themeToggle');
-  if (btn) btn.innerHTML = dark ? SUN : MOON;
+  const icon = $('#themeIcon');
+  if (icon) icon.innerHTML = dark ? SUN : MOON;
+  const state = $('#themeState');
+  if (state) state.textContent = dark ? '深色' : '浅色';
 }
 
 function toggleTheme() {
   setTheme(!document.documentElement.classList.contains('dark-theme'));
+}
+
+/* 顶栏只留一个「设置」入口，其余都收进下拉。 */
+let settingsOpen = false;
+
+function renderSettings() {
+  const menu = $('#settingsMenu');
+  const btn = $('#settingsBtn');
+  if (menu) menu.hidden = !settingsOpen;
+  if (btn) btn.setAttribute('aria-expanded', settingsOpen ? 'true' : 'false');
+}
+
+function closeSettings() {
+  if (!settingsOpen) return;
+  settingsOpen = false;
+  renderSettings();
 }
 
 /* ---------- realtime ---------- */
@@ -1474,15 +1486,9 @@ function updatePushButton() {
   btn.classList.toggle('push-on', pushEnabled);
   btn.classList.toggle('push-off', !pushEnabled);
   btn.setAttribute('aria-pressed', pushEnabled ? 'true' : 'false');
-  const label = pushEnabled ? '关闭通知' : '开启通知';
-  btn.setAttribute('aria-label', label);
-  btn.title = pushMsg || label;
-  const test = $('#pushTest');
-  if (test) {
-    test.title = pushDevices
-      ? `发一条测试通知（${pushDevices} 台设备）`
-      : '发一条测试通知（还没有设备订阅）';
-  }
+  btn.title = pushMsg || (pushEnabled ? '关闭通知' : '开启通知');
+  const state = $('#pushState');
+  if (state) state.textContent = pushEnabled ? (pushDevices ? `${pushDevices} 台` : '开') : '关';
 }
 
 async function syncPushStatus() {
@@ -1494,22 +1500,6 @@ async function syncPushStatus() {
     pushMsg = st.message || '';
     updatePushButton();
   } catch (_) {}
-}
-
-// 用户自己点一下就能知道手机收不收得到。
-async function sendTestPush() {
-  const btn = $('#pushTest');
-  if (btn) btn.disabled = true;
-  try {
-    const res = await api('/api/push/test', { method: 'POST' });
-    pushDevices = res.devices || 0;
-    updatePushButton();
-    toast(res.message || '测试通知已发出');
-  } catch (e) {
-    toast('测试通知没发出去：' + e.message, 'bad');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
 }
 
 function urlBase64ToUint8Array(base64) {
@@ -1602,10 +1592,26 @@ function bindUI() {
   if (bound) return;
   bound = true;
 
-  $('#themeToggle').addEventListener('click', toggleTheme);
-  $('#pushToggle').addEventListener('click', togglePush);
-  $('#pushTest').addEventListener('click', sendTestPush);
+  $('#themeToggle').addEventListener('click', () => { toggleTheme(); renderSettings(); });
+  $('#pushToggle').addEventListener('click', async () => { await togglePush(); renderSettings(); });
   updatePushButton();
+
+  // 设置下拉：点外面、按 Esc 都收起来。
+  const settingsBtn = $('#settingsBtn');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', () => {
+      settingsOpen = !settingsOpen;
+      renderSettings();
+    });
+  }
+  document.addEventListener('click', e => {
+    if (!settingsOpen) return;
+    if (e.target.closest('.settings-wrap')) return;
+    closeSettings();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && settingsOpen) { closeSettings(); settingsBtn && settingsBtn.focus(); }
+  });
 
   // 筛选：标签多选、Agent 切换、清除
   const tagRow = $('#tagRow');
@@ -1637,8 +1643,6 @@ function bindUI() {
       refreshActivity();
     });
   }
-  placeAgentSwitch();
-  window.addEventListener('resize', placeAgentSwitch);
   $('#pendingToggle').addEventListener('click', () => {
     pendingOpen = !pendingOpen;
     renderPendingBar();
@@ -1659,25 +1663,6 @@ function bindUI() {
     location.replace('/login');
   });
   $('#sheetClose').addEventListener('click', closeSheet);
-
-  const deployBtn = $('#deployBtn');
-  if (deployBtn) {
-    const canDeploy = !!document.querySelector('meta[name="deploy-support"]');
-    deployBtn.hidden = !canDeploy;
-    if (canDeploy) {
-      deployBtn.addEventListener('click', async () => {
-        deployBtn.disabled = true;
-        try {
-          const r = await api('/api/deploy', { method: 'POST' });
-          toast(r.msg || '已开始更新');
-        } catch (e) {
-          if (e.message !== 'unauthorized') toast('更新失败：' + e.message, 'bad');
-        } finally {
-          setTimeout(() => { deployBtn.disabled = false; }, 3000);
-        }
-      });
-    }
-  }
 
   $$('.tab, .bnav-item').forEach(b => {
     b.addEventListener('click', () => setView(b.dataset.view));

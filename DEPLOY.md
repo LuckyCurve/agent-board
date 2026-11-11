@@ -38,8 +38,7 @@
 systemctl start agent-board-autodeploy.service
 ```
 
-面板右上角还有「立即更新」按钮，等同于上面这条命令（走 `POST /api/deploy`，
-只认 Agent token；没启用自动更新的机器上不显示）。
+面板右上角不再放「立即更新」按钮：要手动刷新，直接跑上面这条命令。
 
 看部署日志：
 

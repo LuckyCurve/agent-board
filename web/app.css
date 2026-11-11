@@ -217,8 +217,48 @@ svg { display: block; }
   gap: 6px;
 }
 
-/* Agent 切换器：宽屏放顶栏，窄屏挪到筛选行。 */
-.agent-slot { display: inline-flex; }
+/* 设置下拉：顶栏只留这一个入口。 */
+.settings-wrap { position: relative; }
+.settings-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 200px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-lift);
+}
+.sm-item {
+  width: 100%;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13.5px;
+  text-align: left;
+}
+.sm-item:hover { background: var(--surface-2); }
+.sm-item svg, .sm-icon svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sm-item.push-on svg { stroke: var(--accent); stroke-width: 2; }
+.sm-text { flex: 1; min-width: 0; }
+.sm-state { font-size: 12px; color: var(--muted); flex: none; }
+
+/* Agent 切换器：跟标签筛选同一条，窄屏也不挪位置。 */
 .agent-select {
   appearance: none;
   -webkit-appearance: none;
@@ -323,9 +363,6 @@ svg { display: block; }
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }
 .icon-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.icon-btn.push-off { color: var(--faint); }
-.icon-btn.push-on { color: var(--accent); }
-.icon-btn.push-on svg { stroke-width: 2; }
 
 /* ---------- layout ---------- */
 

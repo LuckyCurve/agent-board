@@ -1133,11 +1133,6 @@ func (s *Server) servePage(w http.ResponseWriter, name string) {
 			tag = `<meta name="api-token" content="` + html.EscapeString(tok) + `">`
 		}
 		b = []byte(strings.Replace(string(b), "<!-- api-token -->", tag, 1))
-		deploy := ""
-		if s.cfg.DeployTrigger != "" {
-			deploy = `<meta name="deploy-support" content="1">`
-		}
-		b = []byte(strings.Replace(string(b), "<!-- deploy-support -->", deploy, 1))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
