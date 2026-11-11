@@ -243,6 +243,9 @@ svg { display: block; }
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }
 .icon-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.icon-btn.push-off { color: var(--faint); }
+.icon-btn.push-on { color: var(--accent); }
+.icon-btn.push-on svg { stroke-width: 2; }
 
 /* ---------- layout ---------- */
 

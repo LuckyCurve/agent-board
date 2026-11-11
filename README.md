@@ -37,6 +37,8 @@ go build -o agent-board.exe .
 手机访问要自己把监听地址改成局域网地址，并确认只在内网暴露。
 iOS Safari / Android Chrome 打开后可「添加到主屏幕」，按独立 App 使用，支持深色模式。
 
+顶栏铃铛启用浏览器通知：只在「等你拍板 / 完成 / 阻塞 / 失败」时推，点通知回到对应卡片，再点一次即关。浏览器只在 HTTPS 或 localhost 下开放通知，局域网 `http://IP:8765` 无法启用；iOS 还要求先「添加到主屏幕」。
+
 ## CLI
 
 CLI 每次都自动读 `~/.agent-board/token`；也可以用 `BOARD_TOKEN` 指定。token 不进仓库、不写日志。

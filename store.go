@@ -61,6 +61,13 @@ type Reply struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+type PushSub struct {
+	Endpoint  string
+	P256dh    string
+	Auth      string
+	CreatedAt string
+}
+
 type Decision struct {
 	ID         string `json:"id"`
 	TaskID     string `json:"task_id"`
@@ -168,6 +175,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS push_subs (
+  endpoint TEXT PRIMARY KEY,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return err
@@ -274,6 +288,49 @@ func (s *Store) DeleteSession(token string) error {
 
 func (s *Store) DeleteAllSessions() error {
 	_, err := s.db.Exec(`DELETE FROM sessions`)
+	return err
+}
+
+func (s *Store) SavePushSub(endpoint, p256dh, auth string) error {
+	if endpoint == "" || p256dh == "" || auth == "" {
+		return errors.New("endpoint and keys required")
+	}
+	_, err := s.db.Exec(`INSERT INTO push_subs(endpoint,p256dh,auth,enabled,created_at)
+		VALUES(?,?,?,1,?) ON CONFLICT(endpoint) DO UPDATE SET
+		p256dh=excluded.p256dh, auth=excluded.auth, enabled=1`, endpoint, p256dh, auth, nowISO())
+	return err
+}
+
+func (s *Store) PushSubs() ([]PushSub, error) {
+	rows, err := s.db.Query(`SELECT endpoint,p256dh,auth,created_at FROM push_subs WHERE enabled=1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PushSub{}
+	for rows.Next() {
+		var p PushSub
+		if err := rows.Scan(&p.Endpoint, &p.P256dh, &p.Auth, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PushSubCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM push_subs WHERE enabled=1`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) ClearPushSubs() error {
+	_, err := s.db.Exec(`DELETE FROM push_subs`)
+	return err
+}
+
+func (s *Store) DeletePushSub(endpoint string) error {
+	_, err := s.db.Exec(`DELETE FROM push_subs WHERE endpoint=?`, endpoint)
 	return err
 }
 

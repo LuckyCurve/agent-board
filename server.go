@@ -92,6 +92,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/replies/{seq}", s.authed(s.handleReplyUpdate))
 	mux.HandleFunc("GET /api/chat", s.authed(s.handleChat))
 	mux.HandleFunc("POST /api/message", s.authed(s.handleMessage))
+	mux.HandleFunc("GET /api/push/key", s.authed(s.handlePushKey))
+	mux.HandleFunc("GET /api/push/status", s.authed(s.handlePushStatus))
+	mux.HandleFunc("POST /api/push/subscribe", s.authed(s.handlePushSubscribe))
+	mux.HandleFunc("POST /api/push/unsubscribe", s.authed(s.handlePushUnsubscribe))
 
 	mux.HandleFunc("GET /api/events", s.authed(s.handleEventsLongPoll))
 	mux.HandleFunc("POST /api/claim", s.authed(s.handleClaim))
@@ -448,6 +452,9 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if t.Column == "done" {
+		s.notify("done", t.ID, t.Title)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"task": t})
 }
 
@@ -494,6 +501,9 @@ func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if req.Kind == "blocked" {
+		s.notify("blocked", ev.TaskID, req.Text)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"event": ev})
 }
@@ -554,6 +564,7 @@ func (s *Server) handleDecisionCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.notify("decision", d.TaskID, d.Question)
 	writeJSON(w, http.StatusCreated, map[string]any{"decision": d})
 }
 
@@ -601,6 +612,13 @@ func (s *Server) handleReplyUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if req.Status == "failed" || req.Status == "timeout" {
+		reason := req.Note
+		if strings.TrimSpace(reason) == "" {
+			reason = rp.Text
+		}
+		s.notify("failed", rp.TaskID, reason)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reply": rp})
 }

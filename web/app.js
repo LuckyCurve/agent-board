@@ -924,6 +924,90 @@ function installViewport() {
   apply();
 }
 
+/* ---------- push ---------- */
+
+let pushEnabled = false;
+
+function pushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+function updatePushButton() {
+  const btn = $('#pushToggle');
+  if (!btn) return;
+  btn.classList.toggle('push-on', pushEnabled);
+  btn.classList.toggle('push-off', !pushEnabled);
+  btn.setAttribute('aria-pressed', pushEnabled ? 'true' : 'false');
+  const label = pushEnabled ? '关闭通知' : '开启通知';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+}
+
+async function syncPushStatus() {
+  if (STATIC || !pushSupported()) return;
+  try {
+    const st = await api('/api/push/status');
+    pushEnabled = !!st.enabled;
+    updatePushButton();
+  } catch (_) {}
+}
+
+function urlBase64ToUint8Array(base64) {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function enablePush() {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') {
+    toast('没拿到通知权限，可在浏览器站点设置里允许');
+    return;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const { key } = await api('/api/push/key');
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(key),
+    });
+  }
+  await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
+  pushEnabled = true;
+  updatePushButton();
+  toast('已开启通知：等你拍板、完成、阻塞时提醒');
+}
+
+async function disablePush() {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) await sub.unsubscribe().catch(() => {});
+  await api('/api/push/unsubscribe', { method: 'POST' });
+  pushEnabled = false;
+  updatePushButton();
+  toast('已关闭通知');
+}
+
+async function togglePush() {
+  if (!window.isSecureContext) {
+    toast('通知需要 HTTPS 或 localhost 访问，当前地址浏览器不开放通知');
+    return;
+  }
+  if (!pushSupported()) {
+    toast('这个浏览器不支持通知');
+    return;
+  }
+  try {
+    if (pushEnabled) await disablePush();
+    else await enablePush();
+  } catch (e) {
+    toast('通知设置失败：' + e.message, 'bad');
+  }
+}
+
 /* ---------- boot ---------- */
 
 async function boot({ keepUI } = {}) {
@@ -945,6 +1029,7 @@ async function boot({ keepUI } = {}) {
       connectSSE();
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
+        syncPushStatus();
       }
     }
   } catch (e) {
@@ -958,6 +1043,8 @@ function bindUI() {
   bound = true;
 
   $('#themeToggle').addEventListener('click', toggleTheme);
+  $('#pushToggle').addEventListener('click', togglePush);
+  updatePushButton();
   $('#logoutBtn').addEventListener('click', async () => {
     try {
       await fetch('/api/logout', {

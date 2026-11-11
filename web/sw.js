@@ -1,4 +1,4 @@
-const CACHE = 'agent-board-v3';
+const CACHE = 'agent-board-v4';
 const SHELL = ['/app.css', '/app.js', '/login.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {
@@ -11,6 +11,34 @@ self.addEventListener('activate', e => {
       .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
+});
+
+self.addEventListener('push', e => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch (_) {}
+  e.waitUntil(self.registration.showNotification(data.title || 'Agent Board', {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: data.task_id || 'agent-board',
+    renotify: true,
+    data: { task_id: data.task_id || '' },
+  }));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const id = (e.notification.data || {}).task_id || '';
+  const url = id ? '/#task=' + encodeURIComponent(id) : '/';
+  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) {
+      if ('focus' in c) {
+        c.navigate(url).catch(() => {});
+        return c.focus();
+      }
+    }
+    return clients.openWindow(url);
+  }));
 });
 
 self.addEventListener('fetch', e => {
