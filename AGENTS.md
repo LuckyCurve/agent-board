@@ -66,12 +66,15 @@ agent-board progress T-1 "一行进展" --agent "..."                # 进展
 agent-board ask --task T-1 --question "..." --options "A,B"       # 待拍板
 agent-board done T-1 --text "结论"                                # 完成
 agent-board message --text "..." --from main                      # 主会话自己回话
+agent-board task tag T-1 add 界面,推送                            # 加标签（remove 去掉）
+agent-board task transfer T-1 --to "另一个 Agent"                 # 转交，事件里留痕
 ```
 
 - 结论写 `conclusion`，不要只写 `note`。
 - 不直连 Telegram；提醒由本机服务发出。
 - 同一件事重复上报用 `--key`，服务端只记一次。
 - 做到一张卡就写一行 `progress`，别攒到最后。
+- 多个 Agent 并行时，每个 Agent 用自己的令牌（`agent-board token --agent "名字"`），只能碰自己名下的卡。
 
 ---
 

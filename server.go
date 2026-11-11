@@ -100,6 +100,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.authed(s.handleTaskDelete))
 	mux.HandleFunc("POST /api/tasks/{id}/events", s.authed(s.handleEventCreate))
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.authed(s.handleTaskEvents))
+	mux.HandleFunc("POST /api/tasks/{id}/tags", s.authed(s.handleTaskTags))
+	mux.HandleFunc("GET /api/agents", s.authed(s.handleAgents))
 
 	mux.HandleFunc("GET /api/decisions", s.authed(s.handleDecisions))
 	mux.HandleFunc("POST /api/decisions", s.authed(s.handleDecisionCreate))
@@ -208,8 +210,45 @@ func (s *Server) validToken(token string) bool {
 }
 
 // hasToken 只看 Agent token，不认网页登录态。
+// 主令牌和绑定了 Agent 的令牌都算数，后者的权限另算。
 func (s *Server) hasToken(r *http.Request) bool {
-	return s.validToken(bearerToken(r))
+	token := bearerToken(r)
+	if token == "" {
+		return false
+	}
+	if s.validToken(token) {
+		return true
+	}
+	_, ok, err := s.store.AgentForToken(sessionHash(token))
+	return err == nil && ok
+}
+
+// agentScope 决定这个请求能碰哪些 Agent 的卡。
+// 主令牌（网页用的那个）不设限；绑定了 Agent 的令牌只能碰自己名下的卡。
+func (s *Server) agentScope(r *http.Request) string {
+	token := bearerToken(r)
+	if token == "" || s.validToken(token) {
+		return ""
+	}
+	agent, ok, err := s.store.AgentForToken(sessionHash(token))
+	if err != nil || !ok {
+		return ""
+	}
+	return agent
+}
+
+// ownsTask 判断请求能不能动这张卡。
+func (s *Server) ownsTask(w http.ResponseWriter, r *http.Request, taskID string) bool {
+	agent := s.agentScope(r)
+	if agent == "" {
+		return true
+	}
+	owner, err := s.store.TaskOwner(taskID)
+	if err != nil || owner != agent {
+		writeErr(w, http.StatusForbidden, "这张卡不归你管")
+		return false
+	}
+	return true
 }
 
 func (s *Server) authed(fn http.HandlerFunc) http.HandlerFunc {
@@ -230,8 +269,10 @@ func (s *Server) authedStream(fn http.HandlerFunc) http.HandlerFunc {
 			token = r.URL.Query().Get("token")
 		}
 		if !s.validToken(token) {
-			writeErr(w, http.StatusUnauthorized, "unauthorized")
-			return
+			if agent, ok, err := s.store.AgentForToken(sessionHash(token)); err != nil || !ok || agent == "" {
+				writeErr(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
 		}
 		fn(w, r)
 	}
@@ -398,7 +439,7 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 // ---- tasks ----
 
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.store.ListTasks(r.URL.Query().Get("view") == "archived")
+	tasks, err := s.store.ListTasks(r.URL.Query().Get("view") == "archived", s.agentScope(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -407,6 +448,49 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		tasks = []Task{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+}
+
+// handleAgents 列出所有 Agent，页面右上角的切换器用。
+func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := s.store.ListAgents()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if agents == nil {
+		agents = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+// handleTaskTags 给卡片加/删标签。
+func (s *Server) handleTaskTags(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.ownsTask(w, r, id) {
+		return
+	}
+	var req struct {
+		Add    []string `json:"add"`
+		Remove []string `json:"remove"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	if _, err := s.store.AddTaskTags(id, req.Add, req.Remove); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	t, _, err := s.store.GetTask(id)
+	if err == ErrNotFound {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": t})
 }
 
 func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +505,10 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// 绑定到某个 Agent 的令牌，建出来的卡就归它。
+	if agent := s.agentScope(r); agent != "" {
+		req.Agent = agent
+	}
 	t, err := s.store.CreateTask(req.Title, req.Project, req.Agent, req.Column, req.Key)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -431,6 +519,9 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.ownsTask(w, r, id) {
+		return
+	}
 	t, events, err := s.store.GetTask(id)
 	if err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "task not found")
@@ -456,15 +547,38 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.ownsTask(w, r, id) {
+		return
+	}
 	var req struct {
 		Column string `json:"column"`
+		Agent  string `json:"agent"`
 		Key    string `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	t, err := s.store.MoveTask(r.PathValue("id"), req.Column, req.Key)
+	// 转交给别的 Agent：留下一条事件说明来龙去脉。
+	if req.Agent != "" {
+		if agent := s.agentScope(r); agent != "" && agent != req.Agent {
+			writeErr(w, http.StatusForbidden, "不能把卡转交给别的 Agent")
+			return
+		}
+		t, err := s.store.AssignTask(id, req.Agent, req.Key)
+		if err == ErrNotFound {
+			writeErr(w, http.StatusNotFound, "task not found")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"task": t})
+		return
+	}
+	t, err := s.store.MoveTask(id, req.Column, req.Key)
 	if err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
@@ -485,6 +599,9 @@ func (s *Server) handleTaskDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if !s.ownsTask(w, r, id) {
+		return
+	}
 	if _, _, err := s.store.GetTask(id); err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
@@ -513,6 +630,9 @@ var allowedEventKinds = map[string]bool{
 }
 
 func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.ownsTask(w, r, r.PathValue("id")) {
+		return
+	}
 	var req struct {
 		Kind    string   `json:"kind"`
 		Text    string   `json:"text"`
@@ -568,6 +688,9 @@ func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.ownsTask(w, r, id) {
+		return
+	}
 	if _, _, err := s.store.GetTask(id); err == ErrNotFound {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
@@ -587,7 +710,7 @@ func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	ds, err := s.store.ListDecisions(status, 200)
+	ds, err := s.store.ListDecisions(status, 200, s.agentScope(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -696,7 +819,7 @@ func (s *Server) handleReplies(w http.ResponseWriter, r *http.Request) {
 // GET /api/chat 返回自由对话（含挂靠的卡片），按新到旧。
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("recent"))
-	msgs, err := s.store.ChatMessagesWithLinked(limit)
+	msgs, err := s.store.ChatMessagesWithLinked(limit, s.agentScope(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -760,8 +883,9 @@ func (s *Server) handleEventsLongPoll(w http.ResponseWriter, r *http.Request) {
 		waitSec = 55
 	}
 	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
+	agent := s.agentScope(r)
 	for {
-		events, err := s.store.EventsAfter(since, limit)
+		events, err := s.store.EventsAfter(since, limit, agent)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -892,7 +1016,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if cur > last {
-				evs, err := s.store.EventsAfter(last, 100)
+				evs, err := s.store.EventsAfter(last, 100, s.agentScope(r))
 				if err != nil {
 					return
 				}
@@ -920,12 +1044,21 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	if days <= 0 || days > 366 {
 		days = 84
 	}
-	rows, err := s.store.db.Query(`
+	// 日历默认是全局的；挑一个 Agent 时只数它名下卡的事件。
+	agent := r.URL.Query().Get("agent")
+	q := `
 		SELECT date(created_at,'localtime') AS d, COUNT(*)
 		FROM events e
 		WHERE date(created_at,'localtime') >= date('now','localtime',?)
-		AND (e.task_id IS NULL OR e.task_id='' OR e.task_id NOT IN (SELECT id FROM tasks WHERE column_name='archived'))
-		GROUP BY d ORDER BY d`, fmt.Sprintf("-%d days", days-1))
+		AND (e.task_id IS NULL OR e.task_id='' OR e.task_id NOT IN (SELECT id FROM tasks WHERE column_name='archived'))`
+	args := []any{fmt.Sprintf("-%d days", days-1)}
+	if agent != "" {
+		q += ` AND (COALESCE(NULLIF(e.link_task,''),e.task_id,'')='' OR COALESCE(NULLIF(e.link_task,''),e.task_id,'') IN
+			(SELECT id FROM tasks WHERE agent=?))`
+		args = append(args, agent)
+	}
+	q += ` GROUP BY d ORDER BY d`
+	rows, err := s.store.db.Query(q, args...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

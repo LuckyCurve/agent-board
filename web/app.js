@@ -17,12 +17,31 @@ const state = {
   decisions: [],
   chat: [],
   activity: [],
+  agents: [],
   view: 'inbox',
   loaded: false,
+  filterAgent: '',      // 空 = 全部 Agent
+  filterTags: [],       // 选中的标签（多选，任一命中即显示）
+  calAgent: '',         // 日历是全局的，这里单独挑一个 Agent 看
 };
 
 // ?static=1 关闭 SSE 与 service worker，供无头截图与弱网排查使用。
 const STATIC = new URLSearchParams(location.search).has('static');
+
+function loadFilters() {
+  try { state.filterAgent = localStorage.getItem('ab-agent') || ''; } catch (_) {}
+  try {
+    const raw = JSON.parse(localStorage.getItem('ab-tags') || '[]');
+    if (Array.isArray(raw)) state.filterTags = raw.filter(x => typeof x === 'string');
+  } catch (_) {}
+}
+
+function saveFilters() {
+  try {
+    localStorage.setItem('ab-agent', state.filterAgent);
+    localStorage.setItem('ab-tags', JSON.stringify(state.filterTags));
+  } catch (_) {}
+}
 
 let openTaskId = null;
 let detailFromSeq = null;  // 从对话点进来的消息 seq，用于返回上下文
@@ -173,12 +192,14 @@ async function refreshTasks() {
   const data = await api('/api/tasks');
   state.tasks = data.tasks || [];
   state.loaded = true;
+  renderFilterBar();
   if (state.view === 'board') renderBoard();
 }
 
 async function refreshArchived() {
   const data = await api('/api/tasks?view=archived');
   state.archived = data.tasks || [];
+  renderFilterBar();
   if (state.view === 'archive') renderArchive();
 }
 
@@ -208,10 +229,12 @@ async function deleteTask(id) {
 function renderArchive() {
   const el = $('#archiveList');
   if (!el) return;
-  const n = state.archived.length;
+  const all = state.archived;
+  const list = all.filter(matchTask);
+  const n = list.length;
   const count = $('#archiveCount');
   if (count) count.textContent = String(n);
-  el.innerHTML = n ? state.archived.map(t => `<article class="archive-row" data-id="${esc(t.id)}">
+  el.innerHTML = n ? list.map(t => `<article class="archive-row" data-id="${esc(t.id)}">
     <div class="ar-main">
       <span class="task-id">${esc(t.id)}</span>
       <b>${esc(t.title)}</b>
@@ -222,7 +245,9 @@ function renderArchive() {
       <button class="btn ghost danger" data-delete="${esc(t.id)}">删除</button>
     </div>
   </article>`).join('')
-    : '<div class="empty"><div class="e-title">还没有归档</div><div class="e-sub">把看板最右「归档」列里的卡片拖过去，或在卡片详情里一键归档</div></div>';
+    : (all.length
+      ? '<div class="empty"><div class="e-title">没有匹配的归档</div><div class="e-sub">换个筛选条件试试</div></div>'
+      : '<div class="empty"><div class="e-title">还没有归档</div><div class="e-sub">把看板最右「归档」列里的卡片拖过去，或在卡片详情里一键归档</div></div>');
 }
 
 async function refreshDecisions() {
@@ -239,8 +264,10 @@ async function refreshChat() {
 }
 
 async function refreshActivity() {
-  const data = await api('/api/activity?days=84');
+  const q = state.calAgent ? '?days=84&agent=' + encodeURIComponent(state.calAgent) : '?days=84';
+  const data = await api('/api/activity' + q);
   state.activity = data.days || [];
+  renderCalAgents();
   if (state.view === 'calendar') renderCalendar();
 }
 
@@ -256,6 +283,112 @@ function updateBadge() {
 
 function taskById(id) {
   return state.tasks.find(t => t.id === id) || null;
+}
+
+/* ---------- 筛选：Agent + 标签 ---------- */
+
+// 一张卡能按什么筛：项目算一个，自定义标签各自算一个。
+function taskTags(t) {
+  const out = [];
+  if (t.project) out.push('项目:' + t.project);
+  (t.tags || []).forEach(x => out.push(x));
+  return out;
+}
+
+function matchTask(t) {
+  if (state.filterAgent && t.agent !== state.filterAgent) return false;
+  if (state.filterTags.length) {
+    const tags = taskTags(t);
+    if (!state.filterTags.some(f => tags.indexOf(f) >= 0)) return false;
+  }
+  return true;
+}
+
+function filterActive() {
+  return !!(state.filterAgent || state.filterTags.length);
+}
+
+// 筛选行上的标签：项目 + 自定义标签，去重排序。
+function allFilterTags() {
+  const set = new Set();
+  state.tasks.concat(state.archived).forEach(t => taskTags(t).forEach(x => set.add(x)));
+  return Array.from(set).sort((a, b) => a.localeCompare(b, 'zh'));
+}
+
+function tagChipHTML(tag) {
+  const on = state.filterTags.indexOf(tag) >= 0;
+  const i = tag.indexOf(':');
+  const kind = i > 0 ? tag.slice(0, i) : '';
+  const name = i > 0 ? tag.slice(i + 1) : tag;
+  const label = kind
+    ? `<i class="tc-kind">${esc(kind)}</i>${esc(name)}`
+    : esc(name);
+  return `<button class="tagchip${on ? ' on' : ''}" data-tag="${esc(tag)}" aria-pressed="${on ? 'true' : 'false'}">${label}</button>`;
+}
+
+function renderFilterBar() {
+  const row = $('#tagRow');
+  if (row) {
+    const tags = allFilterTags();
+    row.innerHTML = tags.length
+      ? tags.map(tagChipHTML).join('')
+      : '<span class="fb-hint">还没有标签，卡片详情里可以加</span>';
+  }
+  const clear = $('#clearFilter');
+  if (clear) clear.hidden = !filterActive();
+  const sel = $('#agentSwitch');
+  if (sel && sel.value !== state.filterAgent) sel.value = state.filterAgent;
+}
+
+function toggleTag(tag) {
+  const i = state.filterTags.indexOf(tag);
+  if (i >= 0) state.filterTags.splice(i, 1);
+  else state.filterTags.push(tag);
+  saveFilters();
+  renderFilterBar();
+  renderBoard();
+  renderArchive();
+  if (state.view === 'inbox') renderInbox();
+}
+
+function clearFilters() {
+  state.filterAgent = '';
+  state.filterTags = [];
+  saveFilters();
+  renderFilterBar();
+  renderBoard();
+  renderArchive();
+  if (state.view === 'inbox') renderInbox();
+  toast('已清除筛选');
+}
+
+async function refreshAgents() {
+  try {
+    const data = await api('/api/agents');
+    state.agents = data.agents || [];
+  } catch (_) {
+    state.agents = [];
+  }
+  const sel = $('#agentSwitch');
+  if (sel) {
+    const cur = state.filterAgent;
+    sel.innerHTML = '<option value="">全部 Agent</option>' +
+      state.agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
+    sel.value = state.agents.indexOf(cur) >= 0 ? cur : '';
+    if (sel.value !== state.filterAgent) {
+      state.filterAgent = sel.value;
+      saveFilters();
+    }
+  }
+  renderCalAgents();
+}
+
+// 切换器放在哪儿：宽屏在顶栏，窄屏挪到筛选行。
+function placeAgentSwitch() {
+  const sel = $('#agentSwitch');
+  if (!sel) return;
+  const target = window.innerWidth >= 900 ? $('#topbarAgentSlot') : $('#filterAgentSlot');
+  if (target && sel.parentElement !== target) target.appendChild(sel);
 }
 
 /* ---------- board ---------- */
@@ -288,6 +421,7 @@ function cardHTML(t) {
     <div class="card-meta">
       ${t.project ? `<span class="chip">${esc(t.project)}</span>` : ''}
       ${t.agent ? `<span class="chip ghost">${esc(t.agent)}</span>` : ''}
+      ${(t.tags || []).map(x => `<span class="chip tag">${esc(x)}</span>`).join('')}
       ${t.pending_decisions > 0 ? `<span class="badge warn">待拍板 ${t.pending_decisions}</span>` : ''}
       <button type="button" class="card-quote" data-quote="${esc(t.id)}">引用</button>
     </div>
@@ -297,8 +431,10 @@ function cardHTML(t) {
 function renderBoard() {
   const board = $('#board');
   if (!board) return;
+  const filtered = filterActive();
   board.innerHTML = COLUMNS.map(col => {
-    const items = col.key === 'archived' ? [] : state.tasks.filter(t => t.column === col.key);
+    const items = col.key === 'archived' ? [] : state.tasks.filter(t => t.column === col.key && matchTask(t));
+    const empty = filtered ? '没有匹配的卡片' : '暂无任务';
     return `<section class="column" data-col="${col.key}" data-drop="1">
       <header class="col-head">
         <span class="col-dot ${col.key}"></span>
@@ -307,7 +443,7 @@ function renderBoard() {
       </header>
       <div class="col-body">
         ${col.key === 'archived' ? '<div class="col-empty">把卡片拖到这里归档</div>' :
-          (items.length ? items.map(cardHTML).join('') : '<div class="col-empty">暂无任务</div>')}
+          (items.length ? items.map(cardHTML).join('') : `<div class="col-empty">${empty}</div>`)}
       </div>
     </section>`;
   }).join('');
@@ -482,8 +618,99 @@ async function refreshDetail(id, keepScroll) {
   }
   $('#d-actions').innerHTML = actions + pendingHTML(decisions || []);
   $('#d-timeline').innerHTML = timelineHTML(events || [], replies || []);
+  bindDetailExtras(task);
 
   if (!keepScroll || atBottom) body.scrollTop = body.scrollHeight;
+}
+
+// 详情里的标签和转交。
+function detailTagsHTML(task) {
+  const tags = task.tags || [];
+  const chips = tags.map(t => `<span class="dtag">${esc(t)}<button data-rmtag="${esc(t)}" aria-label="去掉标签 ${esc(t)}">×</button></span>`).join('');
+  return `<div class="d-tags" id="dTags">
+    <span class="dt-label">标签</span>
+    ${chips}
+    <input class="dtag-input" id="dTagInput" placeholder="加个标签" maxlength="24">
+    <button class="dtag-add" id="dTagAdd">添加</button>
+  </div>`;
+}
+
+function detailAssignHTML(task) {
+  const list = state.agents.slice();
+  if (task.agent && list.indexOf(task.agent) < 0) list.unshift(task.agent);
+  const opts = ['<option value="">（不指派）</option>']
+    .concat(list.map(a => `<option value="${esc(a)}"${a === task.agent ? ' selected' : ''}>${esc(a)}</option>`)).join('');
+  return `<div class="d-assign">
+    <label for="dAssign">负责 Agent</label>
+    <select id="dAssign">${opts}</select>
+    <button class="btn ghost tiny" id="dAssignBtn">转交</button>
+  </div>`;
+}
+
+function bindDetailExtras(task) {
+  const body = $('#d-actions');
+  if (!body) return;
+  body.insertAdjacentHTML('beforeend', detailTagsHTML(task) + detailAssignHTML(task));
+
+  const add = $('#dTagAdd');
+  const input = $('#dTagInput');
+  const submit = () => {
+    const v = (input.value || '').trim();
+    if (!v) return;
+    input.value = '';
+    addTaskTag(task.id, v);
+  };
+  if (add) add.addEventListener('click', submit);
+  if (input) input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); submit(); }
+  });
+
+  body.querySelectorAll('[data-rmtag]').forEach(b => b.addEventListener('click', () => {
+    removeTaskTag(task.id, b.dataset.rmtag);
+  }));
+
+  const assign = $('#dAssignBtn');
+  if (assign) assign.addEventListener('click', async () => {
+    const sel = $('#dAssign');
+    if (!sel || !sel.value) { toast('先选一个 Agent', 'bad'); return; }
+    try {
+      await api('/api/tasks/' + encodeURIComponent(task.id), {
+        method: 'PATCH', body: { agent: sel.value },
+      });
+      toast('已转交给 ' + sel.value);
+      await Promise.all([refreshTasks(), refreshAgents()]);
+      if (openTaskId) await refreshDetail(openTaskId, true);
+    } catch (e) {
+      toast('转交失败：' + e.message, 'bad');
+    }
+  });
+}
+
+async function addTaskTag(taskID, tag) {
+  try {
+    await api('/api/tasks/' + encodeURIComponent(taskID) + '/tags', {
+      method: 'POST', body: { add: [tag] },
+    });
+    await refreshTasks();
+    renderFilterBar();
+    if (openTaskId) await refreshDetail(openTaskId, true);
+    toast('已加标签');
+  } catch (e) {
+    toast('加标签失败：' + e.message, 'bad');
+  }
+}
+
+async function removeTaskTag(taskID, tag) {
+  try {
+    await api('/api/tasks/' + encodeURIComponent(taskID) + '/tags', {
+      method: 'POST', body: { remove: [tag] },
+    });
+    await refreshTasks();
+    renderFilterBar();
+    if (openTaskId) await refreshDetail(openTaskId, true);
+  } catch (e) {
+    toast('去掉标签失败：' + e.message, 'bad');
+  }
 }
 
 function closeSheet() {
@@ -936,8 +1163,14 @@ function renderInbox() {
     : `<div class="empty"><svg viewBox="0 0 24 24"><path d="M4 13.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7.5"/><path d="M4 13.5h4.2l1.4 2.2h4.8l1.4-2.2H20V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
         <div class="e-title">没有待拍板项</div><div class="e-sub">需要你决定的事会出现在这里</div></div>`;
 
-  // 接口按新到旧返回；聊天流按 IM 习惯旧在上、新在下。
-  const msgs = state.chat.slice().reverse();
+  // 挂了卡的消息跟着筛选走；没挂卡的自由对话一直看得见。
+  const msgs = state.chat.slice().reverse().filter(m => {
+    if (!filterActive()) return true;
+    const tid = m.link_task || m.task_id;
+    if (!tid) return true;
+    const t = taskById(tid);
+    return t ? matchTask(t) : true;
+  });
   const msgList = (msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>')
     + (systemNote ? `<li class="msg-system">${esc(systemNote)}</li>` : '');
   const scrollHTML = `
@@ -1013,6 +1246,14 @@ function addDays(d, n) {
   const x = new Date(d);
   x.setDate(x.getDate() + n);
   return x;
+}
+
+// 日历是全局的，这里单独挑一个 Agent 看它的动静。
+function renderCalAgents() {
+  const el = $('#calAgents');
+  if (!el) return;
+  const chips = [{ v: '', n: '全部' }].concat(state.agents.map(a => ({ v: a, n: a })));
+  el.innerHTML = chips.map(c => `<button class="tagchip${state.calAgent === c.v ? ' on' : ''}" data-calagent="${esc(c.v)}">${esc(c.n)}</button>`).join('');
 }
 
 function renderCalendar() {
@@ -1329,10 +1570,12 @@ async function boot({ keepUI } = {}) {
     skeletonBoard();
     setTheme(document.documentElement.classList.contains('dark-theme'));
   }
+  loadFilters();
   bindUI();
   installViewport();
   try {
-    await Promise.all([refreshTasks(), refreshDecisions()]);
+    await Promise.all([refreshTasks(), refreshDecisions(), refreshAgents()]);
+    renderFilterBar();
     const v = viewFromHash();
     setView(v, true);
     if (v === 'inbox') await refreshChat();
@@ -1363,6 +1606,39 @@ function bindUI() {
   $('#pushToggle').addEventListener('click', togglePush);
   $('#pushTest').addEventListener('click', sendTestPush);
   updatePushButton();
+
+  // 筛选：标签多选、Agent 切换、清除
+  const tagRow = $('#tagRow');
+  if (tagRow) {
+    tagRow.addEventListener('click', e => {
+      const chip = e.target.closest('[data-tag]');
+      if (chip) toggleTag(chip.dataset.tag);
+    });
+  }
+  const clearBtn = $('#clearFilter');
+  if (clearBtn) clearBtn.addEventListener('click', clearFilters);
+  const agentSel = $('#agentSwitch');
+  if (agentSel) {
+    agentSel.addEventListener('change', () => {
+      state.filterAgent = agentSel.value;
+      saveFilters();
+      renderFilterBar();
+      renderBoard();
+      renderArchive();
+      if (state.view === 'inbox') renderInbox();
+    });
+  }
+  const calAgents = $('#calAgents');
+  if (calAgents) {
+    calAgents.addEventListener('click', e => {
+      const chip = e.target.closest('[data-calagent]');
+      if (!chip) return;
+      state.calAgent = chip.dataset.calagent;
+      refreshActivity();
+    });
+  }
+  placeAgentSwitch();
+  window.addEventListener('resize', placeAgentSwitch);
   $('#pendingToggle').addEventListener('click', () => {
     pendingOpen = !pendingOpen;
     renderPendingBar();

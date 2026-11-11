@@ -180,10 +180,29 @@ func cmdToken(args []string) {
 	fs := flag.NewFlagSet("token", flag.ExitOnError)
 	dataFlag := fs.String("data", "", "data directory")
 	rotate := fs.Bool("new", false, "generate a new token")
+	agent := fs.String("agent", "", "bind a new token to this agent (it only sees that agent's cards)")
 	fs.Parse(args)
 	p, err := resolvePaths(*dataFlag, "")
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *agent != "" {
+		// 给某个 Agent 单独发一把令牌：它只能碰自己名下的卡。
+		store, err := OpenStore(p.db)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer store.Close()
+		tok, err := randomHex(32)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := store.SaveAgentToken(sessionHash(tok), *agent); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintf(os.Stderr, "给「%s」发了一把令牌（只显示这一次）\n", *agent)
+		fmt.Println(tok)
+		return
 	}
 	if *rotate {
 		tok, err := randomHex(32)

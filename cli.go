@@ -169,6 +169,8 @@ func cmdTask(args []string) {
 		agent := fs.String("agent", "", "owning agent")
 		column := fs.String("column", "todo", "todo|doing|blocked|done")
 		key := fs.String("key", "", "idempotency key")
+		var tags stringList
+		fs.Var(&tags, "tag", "tag to attach (repeatable)")
 		fs.Parse(args[1:])
 		if *title == "" {
 			fmt.Fprintln(os.Stderr, "--title required")
@@ -177,12 +179,22 @@ func cmdTask(args []string) {
 		var resp struct {
 			Task Task `json:"task"`
 		}
-		err := mustClient().do("POST", "/api/tasks", map[string]string{
+		c := mustClient()
+		err := c.do("POST", "/api/tasks", map[string]string{
 			"title": *title, "project": *project, "agent": *agent,
 			"column": *column, "key": *key,
 		}, &resp)
 		if err != nil {
 			fail(err)
+		}
+		if len(tags) > 0 {
+			var tagResp struct {
+				Task Task `json:"task"`
+			}
+			if err := c.do("POST", "/api/tasks/"+url.PathEscape(resp.Task.ID)+"/tags",
+				map[string][]string{"add": tags}, &tagResp); err != nil {
+				fail(err)
+			}
 		}
 		fmt.Println(resp.Task.ID)
 
@@ -255,6 +267,59 @@ func cmdTask(args []string) {
 			}
 			fmt.Printf("%s  %-10s %s\n", ts, label, oneLine(e.Body, 120))
 		}
+
+	case "tag":
+		// agent-board task tag T-1 add bug,ui | remove old
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: agent-board task tag T-1 add|remove tag[,tag...]")
+			os.Exit(2)
+		}
+		action := args[2]
+		if action != "add" && action != "remove" {
+			fmt.Fprintln(os.Stderr, "action 只能是 add 或 remove")
+			os.Exit(2)
+		}
+		var list []string
+		for _, t := range strings.Split(strings.ReplaceAll(args[3], "，", ","), ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				list = append(list, t)
+			}
+		}
+		if len(list) == 0 {
+			fmt.Fprintln(os.Stderr, "没给标签")
+			os.Exit(2)
+		}
+		body := map[string][]string{}
+		body[action] = list
+		var tagResp struct {
+			Task Task `json:"task"`
+		}
+		if err := mustClient().do("POST", "/api/tasks/"+url.PathEscape(args[1])+"/tags", body, &tagResp); err != nil {
+			fail(err)
+		}
+		fmt.Printf("ok %s tags=%v\n", tagResp.Task.ID, tagResp.Task.Tags)
+
+	case "transfer":
+		// agent-board task transfer T-1 --to "另一个 Agent"
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: agent-board task transfer T-1 --to \"Agent\"")
+			os.Exit(2)
+		}
+		fs := flag.NewFlagSet("task transfer", flag.ExitOnError)
+		to := fs.String("to", "", "new owning agent")
+		fs.Parse(args[2:])
+		if *to == "" {
+			fmt.Fprintln(os.Stderr, "--to required")
+			os.Exit(2)
+		}
+		var transferResp struct {
+			Task Task `json:"task"`
+		}
+		if err := mustClient().do("PATCH", "/api/tasks/"+url.PathEscape(args[1]),
+			map[string]string{"agent": *to}, &transferResp); err != nil {
+			fail(err)
+		}
+		fmt.Printf("ok %s -> %s\n", transferResp.Task.ID, transferResp.Task.Agent)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown task command %q\n", args[0])

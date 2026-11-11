@@ -107,6 +107,28 @@ agent-board message --text "跑通了" --from main --image shot.png
 
 主会话自己说话用 `agent-board message --text "..." --from main`。这类回话在 `watch` 里是 `BOARD_AGENT_MESSAGE`，不会把卡片点亮成「执行中」，也不会生成待处理的回执。
 
+## 标签与转交
+
+卡片可以打任意关键词标签；页面顶栏下方一行是多选筛选，选中的会记住。
+
+```bash
+agent-board task new --title "改登录页" --tag 界面 --tag 登录
+agent-board task tag T-1 add 界面,登录
+agent-board task tag T-1 remove 登录
+agent-board task transfer T-1 --to "看板开发"   # 转交，事件里留痕
+```
+
+项目也算一个筛选维度（页面里显示成「项目 · 名字」）；Agent 归右上角的切换器管，两者一起生效。
+
+## 一个 Agent 一把令牌
+
+```bash
+agent-board token --agent "看板开发"     # 生成一把只属于这个 Agent 的令牌（只显示一次）
+export BOARD_TOKEN=...                    # 用它跑 CLI
+```
+
+这把令牌只能看见和改动自己名下的卡：别人的卡读不到、改不了，事件流里也只有自己的动静（没挂卡的消息照收）。主令牌（`~/.agent-board/token`）不受限制，网页用的就是它。
+
 ## 回执状态
 
 用户每次输入会生成一条回执：`received → processing → done | failed | timeout`。

@@ -107,3 +107,31 @@ func TestComposerHasPlusMenuAndActiveTask(t *testing.T) {
 		t.Fatal("the composer should have one + button, not separate image buttons")
 	}
 }
+
+// 顶栏有 Agent 切换器，下面有多选标签行；两者都要记住选择。
+func TestFilterBarHasAgentSwitchAndTags(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	for _, want := range []string{`id="agentSwitch"`, `id="tagRow"`, `id="clearFilter"`, `id="filterBar"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("缺少 %s", want)
+		}
+	}
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{"ab-agent", "ab-tags", "toggleTag", "matchTask"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js 缺少 %s（筛选要记住选择）", want)
+		}
+	}
+}
+
+// 卡片详情里能加标签、能转交。
+func TestDetailHasTagsAndTransfer(t *testing.T) {
+	e := newTestEnv(t)
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{"/tags", "dTagAdd", "dAssignBtn", "转交"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js 缺少 %s", want)
+		}
+	}
+}

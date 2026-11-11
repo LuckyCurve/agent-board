@@ -34,17 +34,18 @@ type Event struct {
 }
 
 type Task struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Project   string `json:"project,omitempty"`
-	Agent     string `json:"agent,omitempty"`
-	Column    string `json:"column"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
-	LastSeq   int64  `json:"last_seq"`
-	LastEvent *Event `json:"last_event,omitempty"`
-	Pending   int    `json:"pending_decisions"`
-	Reply     *Reply `json:"reply,omitempty"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Project   string   `json:"project,omitempty"`
+	Agent     string   `json:"agent,omitempty"`
+	Column    string   `json:"column"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+	LastSeq   int64    `json:"last_seq"`
+	LastEvent *Event   `json:"last_event,omitempty"`
+	Pending   int      `json:"pending_decisions"`
+	Reply     *Reply   `json:"reply,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
 }
 
 // Reply 是用户某次输入的处理状态：received → processing → done / failed / timeout。
@@ -180,6 +181,17 @@ CREATE TABLE IF NOT EXISTS push_subs (
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_tags (
+  task_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY(task_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag);
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  token_hash TEXT PRIMARY KEY,
+  agent TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 `)
@@ -542,17 +554,26 @@ func (s *Store) ChatMessages(limit int) ([]Event, error) {
 	return scanEvents(rows)
 }
 
-func (s *Store) ChatMessagesWithLinked(limit int) ([]Event, error) {
+func (s *Store) ChatMessagesWithLinked(limit int, agent string) ([]Event, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	// 历史卡片消息（chat=0 的 user_reply）也算对话，避免卡片里发过的话成为孤岛。
-	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
+	// agent 非空时只给这个 Agent 名下的卡的消息，没挂卡的自由对话照给。
+	q := `SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
 		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events e
 		WHERE (chat=1 OR kind IN ('user_reply','user_reaction'))
-		AND (NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=COALESCE(NULLIF(e.link_task,''),e.task_id) AND t.column_name='archived'))
-		ORDER BY seq DESC LIMIT ?`, limit)
+		AND (NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=COALESCE(NULLIF(e.link_task,''),e.task_id,'') AND t.column_name='archived'))`
+	args := []any{}
+	if agent != "" {
+		q += ` AND (COALESCE(NULLIF(e.link_task,''),e.task_id,'')='' OR COALESCE(NULLIF(e.link_task,''),e.task_id,'') IN
+			(SELECT id FROM tasks WHERE agent=?))`
+		args = append(args, agent)
+	}
+	q += ` ORDER BY seq DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -605,19 +626,25 @@ func (s *Store) MoveTask(taskID, column, key string) (Task, error) {
 	return t, nil
 }
 
-func (s *Store) ListTasks(archived bool) ([]Task, error) {
+// ListTasks 列出卡片。agent 非空时只看这一个 Agent 的卡。
+func (s *Store) ListTasks(archived bool, agent string) ([]Task, error) {
 	s.SweepReplies()
 	where := `t.column_name<>'archived'`
 	if archived {
 		where = `t.column_name='archived'`
 	}
+	args := []any{}
+	if agent != "" {
+		where += ` AND t.agent=?`
+		args = append(args, agent)
+	}
 	rows, err := s.db.Query(`
 		SELECT t.id,t.title,COALESCE(t.project,''),COALESCE(t.agent,''),t.column_name,
 		       t.created_at,t.updated_at,t.last_seq,
 		       (SELECT COUNT(*) FROM decisions d WHERE d.task_id=t.id AND d.status='pending')
-		FROM tasks t WHERE ` + where + `
+		FROM tasks t WHERE `+where+`
 		ORDER BY CASE t.column_name WHEN 'todo' THEN 0 WHEN 'doing' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END,
-		         t.updated_at DESC`)
+		         t.updated_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -639,6 +666,9 @@ func (s *Store) ListTasks(archived bool) ([]Task, error) {
 			out[i].LastEvent = ev
 		}
 		out[i].Reply = s.openReplyForTask(out[i].ID)
+	}
+	if err := s.attachTags(out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -673,6 +703,10 @@ func (s *Store) GetTask(taskID string) (Task, []Event, error) {
 	evs, err := s.EventsByTask(taskID, 1000)
 	t.LastEvent, _ = s.lastEvent(taskID)
 	t.Reply = s.openReplyForTask(taskID)
+	one := []Task{t}
+	if err := s.attachTags(one); err == nil {
+		t.Tags = one[0].Tags
+	}
 	return t, evs, err
 }
 
@@ -687,10 +721,21 @@ func (s *Store) EventsByTask(taskID string, limit int) ([]Event, error) {
 	return scanEvents(rows)
 }
 
-func (s *Store) EventsAfter(seq int64, limit int) ([]Event, error) {
-	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
+// EventsAfter 取新事件。agent 非空时只给这个 Agent 名下的卡的事件，
+// 但没挂卡的消息照给——用户说的话每个 Agent 都要听见。
+func (s *Store) EventsAfter(seq int64, limit int, agent string) ([]Event, error) {
+	q := `SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
 		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
-		FROM events WHERE seq>? ORDER BY seq ASC LIMIT ?`, seq, limit)
+		FROM events WHERE seq>?`
+	args := []any{seq}
+	if agent != "" {
+		q += ` AND (COALESCE(NULLIF(link_task,''),task_id,'')='' OR COALESCE(NULLIF(link_task,''),task_id,'') IN
+			(SELECT id FROM tasks WHERE agent=?))`
+		args = append(args, agent)
+	}
+	q += ` ORDER BY seq ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -862,16 +907,23 @@ func (s *Store) AnswerDecision(id, answer, key string) (Decision, error) {
 	return d, nil
 }
 
-func (s *Store) ListDecisions(status string, limit int) ([]Decision, error) {
+// ListDecisions 列出待拍板。agent 非空时只给这个 Agent 名下的卡。
+func (s *Store) ListDecisions(status string, limit int, agent string) ([]Decision, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`SELECT id,task_id,question,COALESCE(options,''),status,COALESCE(answer,''),
+	q := `SELECT id,task_id,question,COALESCE(options,''),status,COALESCE(answer,''),
 		created_at,COALESCE(answered_at,'') FROM decisions d
 		WHERE (?='' OR status=?)
-		AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND t.column_name='archived')
-		ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC LIMIT ?`,
-		status, status, limit)
+		AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND t.column_name='archived')`
+	args := []any{status, status}
+	if agent != "" {
+		q += ` AND d.task_id IN (SELECT id FROM tasks WHERE agent=?)`
+		args = append(args, agent)
+	}
+	q += ` ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
