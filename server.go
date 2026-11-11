@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/replies", s.authed(s.handleReplies))
 	mux.HandleFunc("PATCH /api/replies/{seq}", s.authed(s.handleReplyUpdate))
+	mux.HandleFunc("GET /api/chat", s.authed(s.handleChat))
 	mux.HandleFunc("POST /api/message", s.authed(s.handleMessage))
 
 	mux.HandleFunc("GET /api/events", s.authed(s.handleEventsLongPoll))
@@ -616,13 +617,26 @@ func (s *Server) handleReplies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"replies": rs})
 }
 
+// GET /api/chat 返回自由对话（含挂靠的卡片），按新到旧。
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("recent"))
+	msgs, err := s.store.ChatMessages(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+}
+
 // POST /api/message 是「随手发一句」的入口：user 的消息等主会话处理，
-// agent 的回话直接进收件箱供用户看，不产生待办回执。
+// agent 的回话直接进对话流供用户看，不产生待办回执。
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Text string `json:"text"`
-		From string `json:"from"`
-		Key  string `json:"key"`
+		Text   string   `json:"text"`
+		From   string   `json:"from"`
+		TaskID string   `json:"task_id"`
+		Images []string `json:"images"`
+		Key    string   `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json")
@@ -636,8 +650,11 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if author == "" {
 		author = "user"
 	}
-	data, _ := json.Marshal(map[string]any{"free": true, "author": author})
-	ev, err := s.store.AddEvent("", "event", "user_reply", req.Text, "", author, "", string(data), req.Key)
+	ev, err := s.store.AddChatMessage(req.Text, author, strings.TrimSpace(req.TaskID), req.Images, req.Key)
+	if err == ErrNotFound {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

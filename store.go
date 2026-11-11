@@ -24,6 +24,8 @@ type Event struct {
 	TaskID    string `json:"task_id,omitempty"`
 	Agent     string `json:"agent,omitempty"`
 	Author    string `json:"author,omitempty"`
+	Chat      bool   `json:"chat,omitempty"`
+	LinkTask  string `json:"link_task,omitempty"`
 	Session   string `json:"session,omitempty"`
 	Kind      string `json:"kind,omitempty"`
 	Body      string `json:"body,omitempty"`
@@ -111,6 +113,8 @@ CREATE TABLE IF NOT EXISTS events (
   task_id TEXT,
   agent TEXT,
   author TEXT,
+  chat INTEGER NOT NULL DEFAULT 0,
+  link_task TEXT,
   session TEXT,
   kind TEXT,
   body TEXT,
@@ -169,18 +173,20 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 		return err
 	}
 	// 老库补列：author 用来区分用户和 Agent 的回话。
-	for _, c := range []struct{ table, column string }{
-		{"events", "author"},
-		{"replies", "author"},
+	for _, c := range []struct{ table, column, ddl string }{
+		{"events", "author", "TEXT"},
+		{"replies", "author", "TEXT"},
+		{"events", "chat", "INTEGER NOT NULL DEFAULT 0"},
+		{"events", "link_task", "TEXT"},
 	} {
-		if err := s.ensureColumn(c.table, c.column); err != nil {
+		if err := s.ensureColumn(c.table, c.column, c.ddl); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) ensureColumn(table, column string) error {
+func (s *Store) ensureColumn(table, column, ddl string) error {
 	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return err
@@ -205,7 +211,7 @@ func (s *Store) ensureColumn(table, column string) error {
 	if err != nil || exists {
 		return err
 	}
-	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` TEXT`)
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + ddl)
 	return err
 }
 
@@ -294,15 +300,15 @@ func insertEvent(tx *sql.Tx, e *Event) (int64, bool, error) {
 		err error
 	)
 	if e.Key != "" {
-		res, err = tx.Exec(`INSERT INTO events(idem_key,type,task_id,agent,author,session,kind,body,data,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`,
-			e.Key, e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Author), nullify(e.Session),
-			nullify(e.Kind), nullify(e.Body), nullify(e.Data), e.CreatedAt)
+		res, err = tx.Exec(`INSERT INTO events(idem_key,type,task_id,agent,author,chat,link_task,session,kind,body,data,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`,
+			e.Key, e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Author), e.Chat,
+			nullify(e.LinkTask), nullify(e.Session), nullify(e.Kind), nullify(e.Body), nullify(e.Data), e.CreatedAt)
 	} else {
-		res, err = tx.Exec(`INSERT INTO events(type,task_id,agent,author,session,kind,body,data,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`,
-			e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Author), nullify(e.Session),
-			nullify(e.Kind), nullify(e.Body), nullify(e.Data), e.CreatedAt)
+		res, err = tx.Exec(`INSERT INTO events(type,task_id,agent,author,chat,link_task,session,kind,body,data,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			e.Type, nullify(e.TaskID), nullify(e.Agent), nullify(e.Author), e.Chat,
+			nullify(e.LinkTask), nullify(e.Session), nullify(e.Kind), nullify(e.Body), nullify(e.Data), e.CreatedAt)
 	}
 	if err != nil {
 		return 0, false, err
@@ -415,6 +421,68 @@ func (s *Store) AddEvent(taskID, typ, kind, body, agent, author, session, data, 
 	return *ev, nil
 }
 
+// AddChatMessage 记一条自由对话。它可以挂一张卡（LinkTask），但仍留在对话流里，
+// 不写进卡片时间线，也不改卡片的「最新进展」。
+func (s *Store) AddChatMessage(text, author, linkTask string, images []string, key string) (Event, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return Event{}, errors.New("text required")
+	}
+	if author == "" {
+		author = "user"
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Event{}, err
+	}
+	defer tx.Rollback()
+	if linkTask != "" {
+		var one int
+		if err := tx.QueryRow(`SELECT 1 FROM tasks WHERE id=?`, linkTask).Scan(&one); err != nil {
+			if err == sql.ErrNoRows {
+				return Event{}, ErrNotFound
+			}
+			return Event{}, err
+		}
+	}
+	payload := map[string]any{"free": true, "author": author}
+	if len(images) > 0 {
+		payload["images"] = images
+	}
+	data, _ := json.Marshal(payload)
+	ev := &Event{Key: key, Type: "event", Kind: "user_reply", Author: author,
+		Chat: true, LinkTask: linkTask, Body: text, Data: string(data)}
+	seq, dup, err := insertEvent(tx, ev)
+	if err != nil {
+		return Event{}, err
+	}
+	if !dup {
+		if err := addReplyTx(tx, seq, "", "", author, text); err != nil {
+			return Event{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Event{}, err
+	}
+	ev.Seq = seq
+	return *ev, nil
+}
+
+// ChatMessages 按新到旧返回自由对话，调用方自行反转成 IM 顺序。
+func (s *Store) ChatMessages(limit int) ([]Event, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
+		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
+		FROM events WHERE chat=1 ORDER BY seq DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
 func (s *Store) MoveTask(taskID, column, key string) (Task, error) {
 	if !columns[column] {
 		return Task{}, fmt.Errorf("invalid column %q (todo/doing/blocked/done)", column)
@@ -487,9 +555,10 @@ func (s *Store) ListTasks() ([]Task, error) {
 func (s *Store) lastEvent(taskID string) (*Event, error) {
 	var e Event
 	err := s.db.QueryRow(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
-		COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
+		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 1`, taskID).
-		Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Author, &e.Session, &e.Kind, &e.Body, &e.Data, &e.CreatedAt)
+		Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Author, &e.Chat, &e.LinkTask,
+			&e.Session, &e.Kind, &e.Body, &e.Data, &e.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +587,7 @@ func (s *Store) GetTask(taskID string) (Task, []Event, error) {
 
 func (s *Store) EventsByTask(taskID string, limit int) ([]Event, error) {
 	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
-		COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
+		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events WHERE task_id=? ORDER BY seq ASC LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, err
@@ -529,7 +598,7 @@ func (s *Store) EventsByTask(taskID string, limit int) ([]Event, error) {
 
 func (s *Store) EventsAfter(seq int64, limit int) ([]Event, error) {
 	rows, err := s.db.Query(`SELECT seq,COALESCE(idem_key,''),type,COALESCE(task_id,''),COALESCE(agent,''),COALESCE(author,''),
-		COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
+		COALESCE(chat,0),COALESCE(link_task,''),COALESCE(session,''),COALESCE(kind,''),COALESCE(body,''),COALESCE(data,''),created_at
 		FROM events WHERE seq>? ORDER BY seq ASC LIMIT ?`, seq, limit)
 	if err != nil {
 		return nil, err
@@ -542,8 +611,8 @@ func scanEvents(rows *sql.Rows) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Author, &e.Session,
-			&e.Kind, &e.Body, &e.Data, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Seq, &e.Key, &e.Type, &e.TaskID, &e.Agent, &e.Author,
+			&e.Chat, &e.LinkTask, &e.Session, &e.Kind, &e.Body, &e.Data, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

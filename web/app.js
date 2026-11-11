@@ -13,7 +13,7 @@ const COLUMNS = [
 const state = {
   tasks: [],
   decisions: [],
-  freeReplies: [],
+  chat: [],
   activity: [],
   view: 'inbox',
   loaded: false,
@@ -23,6 +23,7 @@ const state = {
 const STATIC = new URLSearchParams(location.search).has('static');
 
 let openTaskId = null;
+let detailFromSeq = null;  // 从对话点进来的消息 seq，用于返回上下文
 let replyTo = null;        // seq of the event being replied to
 let draftText = '';
 let freeDraft = '';
@@ -172,9 +173,9 @@ async function refreshDecisions() {
   if (state.view === 'inbox') renderInbox();
 }
 
-async function refreshFreeReplies() {
-  const data = await api('/api/replies?free=1&recent=12');
-  state.freeReplies = data.replies || [];
+async function refreshChat() {
+  const data = await api('/api/chat?recent=80');
+  state.chat = data.messages || [];
   if (state.view === 'inbox') renderInbox();
 }
 
@@ -210,8 +211,11 @@ function cardHTML(t) {
   const last = t.last_event;
   const lastText = trunc(lastTextOf(last), 96);
   const r = t.reply;
-  const strip = r && r.status !== 'done'
+  const alert = taskAlert(t);
+  const strip = r && (r.status === 'received' || r.status === 'processing')
     ? `<div class="reply-strip ${esc(r.status)}">${statusBadge(r)}</div>` : '';
+  const alertHTML = alert && alert.kind === 'failed'
+    ? `<div class="card-alert"><b>${esc(alert.label)}</b><span>${esc(trunc(alert.reason, 64))}</span></div>` : '';
   return `<article class="card" data-id="${esc(t.id)}" tabindex="0" role="button" aria-label="${esc(t.title)}">
     <div class="card-top">
       <span class="status-dot ${esc(t.column)}"></span>
@@ -220,6 +224,7 @@ function cardHTML(t) {
     </div>
     <h3 class="card-title">${esc(t.title)}</h3>
     ${lastText ? `<p class="card-last">${esc(lastText)}</p>` : ''}
+    ${alertHTML}
     ${strip}
     <div class="card-meta">
       ${t.project ? `<span class="chip">${esc(t.project)}</span>` : ''}
@@ -349,8 +354,9 @@ function pendingHTML(decisions) {
   }).join('');
 }
 
-async function openTask(id) {
+async function openTask(id, fromSeq) {
   openTaskId = id;
+  detailFromSeq = fromSeq || null;
   replyTo = null;
   draftText = '';
   const dlg = $('#detail');
@@ -359,6 +365,19 @@ async function openTask(id) {
   // 默认从标题看起；#task=T-1&bottom=1 直接落到底部的回复状态（深链/截图用）。
   const body = $('#sheetBody');
   if (body) body.scrollTop = location.hash.includes('bottom=1') ? body.scrollHeight : 0;
+}
+
+function backToChat(seq) {
+  closeSheet();
+  setView('inbox');
+  setTimeout(() => {
+    const item = document.querySelector(`.msg-item[data-seq="${seq}"]`);
+    if (!item) return;
+    chatPinned = false;
+    item.scrollIntoView({ block: 'center' });
+    item.classList.add('flash');
+    setTimeout(() => item.classList.remove('flash'), 1600);
+  }, 350);
 }
 
 async function refreshDetail(id, keepScroll) {
@@ -385,7 +404,15 @@ async function refreshDetail(id, keepScroll) {
     task.agent ? `<span class="chip ghost">${esc(task.agent)}</span>` : '',
     `<span class="chip ghost">更新于 ${rel(task.updated_at)}</span>`,
   ].join('');
-  $('#d-actions').innerHTML = pendingHTML(decisions || []);
+  const alert = taskAlert(task);
+  let actions = '';
+  if (alert && alert.kind === 'failed') {
+    actions += `<div class="detail-alert"><b>${esc(alert.label)}</b><span>${esc(trunc(alert.reason, 120))}</span></div>`;
+  }
+  if (detailFromSeq) {
+    actions += `<button class="btn ghost d-back-chat" id="dBackChat" data-seq="${detailFromSeq}">← 回到对话 #${detailFromSeq}</button>`;
+  }
+  $('#d-actions').innerHTML = actions + pendingHTML(decisions || []);
   $('#d-timeline').innerHTML = timelineHTML(events || [], replies || []);
 
   restoreDraft();
@@ -398,6 +425,7 @@ function closeSheet() {
   const dlg = $('#detail');
   if (dlg.open) dlg.close();
   openTaskId = null;
+  detailFromSeq = null;
   replyTo = null;
   draftText = '';
   if (location.hash.includes('task=')) history.replaceState(null, '', location.pathname);
@@ -495,7 +523,7 @@ async function sendFreeMessage(text) {
     const sent = $('#freeInput');
     if (sent) { sent.value = ''; autogrow(sent); }
     toast('已发出，主会话已接到');
-    await Promise.all([refreshFreeReplies(), refreshDecisions()]);
+    await Promise.all([refreshChat(), refreshDecisions()]);
     const after = $('#freeInput');
     if (after) { after.value = ''; autogrow(after); after.focus(); }
   } catch (e) {
@@ -534,13 +562,47 @@ function decisionHTML(d) {
   </article>`;
 }
 
-function messageHTML(r) {
-  const agent = r.author && r.author !== 'user';
-  const who = agent ? (r.author || 'Agent') : '你';
-  return `<li class="msg-item${agent ? ' agent' : ''}">
+function parseData(s) {
+  try { return JSON.parse(s || '{}') || {}; } catch (_) { return {}; }
+}
+
+// 一张卡目前最需要被看见的状态：等人拍板 > 阻塞 > 失败/超时 > 已交付 > 进行中。
+function taskAlert(t) {
+  if (!t) return null;
+  if (t.pending_decisions > 0) {
+    const d = state.decisions.find(x => x.task_id === t.id && x.status === 'pending');
+    return { kind: 'decision', label: '等你拍板', reason: d ? d.question : '' };
+  }
+  if (t.column === 'blocked') {
+    const e = t.last_event;
+    return { kind: 'failed', label: '阻塞', reason: e && e.kind === 'blocked' ? e.body : '任务已阻塞' };
+  }
+  const r = t.reply;
+  if (r && (r.status === 'failed' || r.status === 'timeout')) {
+    return { kind: 'failed', label: r.status === 'timeout' ? '超时' : '失败', reason: r.note || 'Agent 没有收尾' };
+  }
+  if (t.column === 'done') return { kind: 'done', label: '已交付', reason: '' };
+  return { kind: 'doing', label: '进行中', reason: '' };
+}
+
+function messageHTML(m) {
+  const agent = m.author && m.author !== 'user';
+  const who = agent ? m.author : '你';
+  const t = m.link_task ? taskById(m.link_task) : null;
+  const sig = t ? taskAlert(t) : null;
+  const chip = sig
+    ? `<button class="msg-task ${sig.kind}" data-task="${esc(t.id)}" data-msg="${m.seq}" title="打开 ${esc(t.id)}">
+         <span class="mt-id">${esc(t.id)}</span><span class="mt-label">${esc(sig.label)}</span>
+       </button>`
+    : '';
+  const alert = sig && sig.kind === 'failed' && sig.reason
+    ? `<div class="msg-alert"><b>${esc(sig.label)}</b><span>${esc(trunc(sig.reason, 90))}</span></div>`
+    : '';
+  return `<li class="msg-item${agent ? ' agent' : ''}${sig && sig.kind === 'failed' ? ' danger' : ''}" data-seq="${m.seq}">
     <div class="msg-who">${esc(who)}</div>
-    <div class="msg-text">${esc(r.text)}</div>
-    <div class="msg-foot">${agent ? '' : statusBadge(r)}<time>${rel(r.created_at)}</time></div>
+    <div class="msg-text">${esc(m.body)}</div>
+    ${alert}
+    <div class="msg-foot">${chip}<time>${rel(m.created_at)}</time></div>
   </li>`;
 }
 
@@ -559,7 +621,7 @@ function renderInbox() {
         <div class="e-title">没有待拍板项</div><div class="e-sub">需要你决定的事会出现在这里</div></div>`;
 
   // 接口按新到旧返回；聊天流按 IM 习惯旧在上、新在下。
-  const msgs = state.freeReplies.slice().reverse();
+  const msgs = state.chat.slice().reverse();
   el.innerHTML = `
     <div class="inbox-scroll" id="inboxScroll">
       <section class="inbox-section">
@@ -682,7 +744,7 @@ function setView(v, fromHash) {
   window.scrollTo(0, 0);
 
   if (v === 'board') renderBoard();
-  if (v === 'inbox') { renderInbox(); refreshFreeReplies().catch(() => {}); }
+  if (v === 'inbox') { renderInbox(); refreshChat().catch(() => {}); }
   if (v === 'calendar') { renderCalendar(); refreshActivity().catch(() => {}); }
 }
 
@@ -724,7 +786,7 @@ function scheduleRefresh() {
       await refreshTasks();
       await refreshDecisions();
       if (state.view === 'calendar') await refreshActivity();
-      if (state.view === 'inbox') await refreshFreeReplies();
+      if (state.view === 'inbox') await refreshChat();
       if (openTaskId) await refreshDetail(openTaskId, true);
     } catch (_) {}
   }, 160);
@@ -774,7 +836,7 @@ async function boot({ keepUI } = {}) {
     await Promise.all([refreshTasks(), refreshDecisions()]);
     const v = viewFromHash();
     setView(v, true);
-    if (v === 'inbox') await refreshFreeReplies();
+    if (v === 'inbox') await refreshChat();
     if (v === 'calendar') await refreshActivity();
     const deep = taskFromHash();
     if (deep) await openTask(deep);
@@ -827,7 +889,7 @@ function bindUI() {
   // dialog backdrop close
   const dlg = $('#detail');
   dlg.addEventListener('click', e => { if (e.target === dlg) closeSheet(); });
-  dlg.addEventListener('close', () => { openTaskId = null; replyTo = null; });
+  dlg.addEventListener('close', () => { openTaskId = null; detailFromSeq = null; replyTo = null; });
 
   // timeline reply buttons
   $('#d-timeline').addEventListener('click', e => {
@@ -841,6 +903,8 @@ function bindUI() {
 
   // pending decision option buttons (detail)
   $('#d-actions').addEventListener('click', e => {
+    const back = e.target.closest('#dBackChat');
+    if (back) { backToChat(Number(back.dataset.seq)); return; }
     const btn = e.target.closest('[data-answer]');
     if (btn) answerDecision(btn.dataset.answer, btn.dataset.value);
   });
@@ -869,7 +933,7 @@ function bindUI() {
     const ans = e.target.closest('[data-answer]');
     if (ans) { answerDecision(ans.dataset.answer, ans.dataset.value); return; }
     const taskBtn = e.target.closest('[data-task]');
-    if (taskBtn) openTask(taskBtn.dataset.task);
+    if (taskBtn) openTask(taskBtn.dataset.task, Number(taskBtn.dataset.msg) || null);
   });
   $('#inbox').addEventListener('submit', e => {
     const form = e.target;

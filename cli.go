@@ -579,17 +579,18 @@ func cmdMessage(args []string) {
 	fs := flag.NewFlagSet("message", flag.ExitOnError)
 	text := fs.String("text", "", "free message text")
 	from := fs.String("from", "user", "author: user or agent name")
+	task := fs.String("task", "", "link the message to a task")
 	key := fs.String("key", "", "idempotency key")
 	fs.Parse(args)
 	if *text == "" {
-		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\" [--from main]")
+		fmt.Fprintln(os.Stderr, "usage: agent-board message --text \"...\" [--from main] [--task T-1]")
 		os.Exit(2)
 	}
 	var resp struct {
 		Event Event `json:"event"`
 	}
 	if err := mustClient().do("POST", "/api/message",
-		map[string]string{"text": *text, "from": *from, "key": *key}, &resp); err != nil {
+		map[string]string{"text": *text, "from": *from, "task_id": *task, "key": *key}, &resp); err != nil {
 		fail(err)
 	}
 	fmt.Printf("ok seq=%d\n", resp.Event.Seq)
