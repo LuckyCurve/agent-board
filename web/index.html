@@ -74,12 +74,19 @@
 </header>
 
 <div class="filterbar" id="filterBar">
-  <div class="fb-tags" id="tagRow"></div>
-  <div class="fb-side">
-    <select id="agentSwitch" class="agent-select" aria-label="按 Agent 过滤">
-      <option value="">全部 Agent</option>
-    </select>
-    <button class="btn ghost tiny" id="clearFilter" hidden>清除筛选</button>
+  <button class="fb-toggle" id="filterToggle" aria-expanded="false" aria-controls="filterPanel">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+    <span>筛选</span>
+    <span class="fb-badge" id="filterBadge" hidden>0</span>
+  </button>
+  <div class="fb-panel" id="filterPanel">
+    <div class="fb-tags" id="tagRow"></div>
+    <div class="fb-side">
+      <select id="agentSwitch" class="agent-select" aria-label="按 Agent 过滤">
+        <option value="">全部 Agent</option>
+      </select>
+      <button class="btn ghost tiny" id="clearFilter" hidden>清除筛选</button>
+    </div>
   </div>
 </div>
 

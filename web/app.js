@@ -341,6 +341,15 @@ function renderFilterBar() {
   if (clear) clear.hidden = !filterActive();
   const sel = $('#agentSwitch');
   if (sel && sel.value !== state.filterAgent) sel.value = state.filterAgent;
+  // 手机上筛选收起时，用按钮上的角标告诉用户「筛着呢」。
+  const badge = $('#filterBadge');
+  if (badge) {
+    const n = state.filterTags.length + (state.filterAgent ? 1 : 0);
+    badge.hidden = n === 0;
+    badge.textContent = String(n);
+  }
+  const toggle = $('#filterToggle');
+  if (toggle) toggle.classList.toggle('on', filterActive());
 }
 
 function toggleTag(tag) {
@@ -1626,6 +1635,17 @@ function bindUI() {
   }
   const clearBtn = $('#clearFilter');
   if (clearBtn) clearBtn.addEventListener('click', clearFilters);
+
+  // 窄屏筛选是折叠的：点按钮才摊开，选完一个标签自动收起，免得一直占着一行。
+  const filterToggle = $('#filterToggle');
+  const filterPanel = $('#filterPanel');
+  if (filterToggle && filterPanel) {
+    filterToggle.addEventListener('click', () => {
+      const open = !filterPanel.classList.contains('open');
+      filterPanel.classList.toggle('open', open);
+      filterToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  }
   const agentSel = $('#agentSwitch');
   if (agentSel) {
     agentSel.addEventListener('change', () => {

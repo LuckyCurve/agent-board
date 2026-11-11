@@ -80,7 +80,7 @@ func TestInboxHeightIsFlexNotCalc(t *testing.T) {
 	if start < 0 {
 		t.Fatal("app.css 缺少对话页布局规则")
 	}
-	rule := css[start:strings.Index(css[start:], "}")+start]
+	rule := css[start : strings.Index(css[start:], "}")+start]
 	for _, want := range []string{"display: flex", "flex-direction: column", "height: calc(100dvh"} {
 		if !strings.Contains(rule, want) {
 			t.Fatalf("对话页应由 body 纵向 flex 撑满：缺 %q\n%s", want, rule)
@@ -149,6 +149,30 @@ func TestBodyLinksAreAnchors(t *testing.T) {
 		if !strings.Contains(lib, want) {
 			t.Fatalf("linkify.js 缺 %s", want)
 		}
+	}
+}
+
+// 窄屏筛选收成一个按钮；摊开会把一行挤爆，375 就放不下。
+func TestFilterCollapsesOnMobile(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	for _, want := range []string{`id="filterToggle"`, `id="filterPanel"`, `id="filterBadge"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("筛选行缺少 %s", want)
+		}
+	}
+	css := getPageBody(t, e, "/app.css")
+	start := strings.Index(css, ".fb-toggle { display: none; }")
+	if start < 0 {
+		t.Fatal("宽屏不该显示筛选按钮")
+	}
+	mobile := strings.Index(css, "@media (max-width: 899px)")
+	if mobile < 0 || !strings.Contains(css[mobile:], ".fb-panel.open { display: flex; }") {
+		t.Fatal("窄屏筛选要能点开")
+	}
+	// 手机上滚动条是浮层，不该再留槽位，否则 320 宽会被挤出横向滚动。
+	if !strings.Contains(css, ".inbox-scroll { scrollbar-gutter: auto; }") {
+		t.Fatal("窄屏不该给滚动条留槽")
 	}
 }
 
