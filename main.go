@@ -54,6 +54,7 @@ func cmdServe(args []string) {
 	passFlag := fs.String("password", "", "web password (default: env BOARD_PASSWORD; generated on first start)")
 	tokenFlag := fs.String("token", "", "agent token (default: env BOARD_TOKEN; generated once into <data>/token)")
 	secure := fs.Bool("secure-cookie", false, "set Secure on session cookie (behind HTTPS)")
+	deployTrigger := fs.String("deploy-trigger", envOr("BOARD_DEPLOY_TRIGGER", ""), "trigger file for 'update now' (default: env BOARD_DEPLOY_TRIGGER)")
 	fs.Parse(args)
 
 	p, err := resolvePaths(*dataFlag, *dbFlag)
@@ -110,7 +111,8 @@ func cmdServe(args []string) {
 
 	srv := NewServer(store, Config{Addr: *addr, Version: version, SecureCookie: *secure,
 		LoginDelay: 250 * time.Millisecond, TokenFile: p.token,
-		ImagesDir: filepath.Join(p.data, "images")})
+		DeployTrigger: *deployTrigger,
+		ImagesDir:     filepath.Join(p.data, "images")})
 	if n, err := srv.cleanupImages(30 * 24 * time.Hour); err == nil && n > 0 {
 		fmt.Printf("  images:   清理了 %d 张 30 天前的旧图\n", n)
 	}

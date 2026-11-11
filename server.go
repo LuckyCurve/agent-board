@@ -44,6 +44,8 @@ type Config struct {
 	ImagesDir string
 	// ImageMaxBytes 单张上限；0 用默认 5MB。
 	ImageMaxBytes int64
+	// DeployTrigger 是「立即更新」的触发文件路径；留空表示本机不提供这个功能。
+	DeployTrigger string
 }
 
 type Server struct {
@@ -111,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/push/status", s.authed(s.handlePushStatus))
 	mux.HandleFunc("POST /api/push/subscribe", s.authed(s.handlePushSubscribe))
 	mux.HandleFunc("POST /api/push/unsubscribe", s.authed(s.handlePushUnsubscribe))
+	mux.HandleFunc("POST /api/deploy", s.authed(s.handleDeploy))
 
 	mux.HandleFunc("GET /api/events", s.authed(s.handleEventsLongPoll))
 	mux.HandleFunc("POST /api/claim", s.authed(s.handleClaim))
@@ -941,6 +944,24 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"days": out})
 }
 
+// ---- deploy ----
+
+// handleDeploy 触发本机自动更新。
+// 这里只写一个触发文件，真正的拉取/构建/重启由服务器上的 systemd 盯着做。
+func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.DeployTrigger == "" {
+		writeErr(w, http.StatusNotImplemented, "本机未启用自动更新")
+		return
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := os.WriteFile(s.cfg.DeployTrigger, []byte(stamp+"\n"), 0o644); err != nil {
+		log.Printf("deploy trigger failed: %v", err)
+		writeErr(w, http.StatusInternalServerError, "触发更新失败")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "msg": "已开始更新，几秒后刷新"})
+}
+
 // ---- static ----
 
 func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
@@ -976,6 +997,11 @@ func (s *Server) servePage(w http.ResponseWriter, name string) {
 			tag = `<meta name="api-token" content="` + html.EscapeString(tok) + `">`
 		}
 		b = []byte(strings.Replace(string(b), "<!-- api-token -->", tag, 1))
+		deploy := ""
+		if s.cfg.DeployTrigger != "" {
+			deploy = `<meta name="deploy-support" content="1">`
+		}
+		b = []byte(strings.Replace(string(b), "<!-- deploy-support -->", deploy, 1))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

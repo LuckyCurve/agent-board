@@ -1361,6 +1361,25 @@ function bindUI() {
   });
   $('#sheetClose').addEventListener('click', closeSheet);
 
+  const deployBtn = $('#deployBtn');
+  if (deployBtn) {
+    const canDeploy = !!document.querySelector('meta[name="deploy-support"]');
+    deployBtn.hidden = !canDeploy;
+    if (canDeploy) {
+      deployBtn.addEventListener('click', async () => {
+        deployBtn.disabled = true;
+        try {
+          const r = await api('/api/deploy', { method: 'POST' });
+          toast(r.msg || '已开始更新');
+        } catch (e) {
+          if (e.message !== 'unauthorized') toast('更新失败：' + e.message, 'bad');
+        } finally {
+          setTimeout(() => { deployBtn.disabled = false; }, 3000);
+        }
+      });
+    }
+  }
+
   $$('.tab, .bnav-item').forEach(b => {
     b.addEventListener('click', () => setView(b.dataset.view));
   });
