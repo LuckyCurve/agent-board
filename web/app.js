@@ -30,6 +30,7 @@ let freeDraft = '';
 let refreshTimer = null;
 let es = null;
 let chatPinned = true;     // 消息流是否贴着底部；用户往上翻时关闭
+let systemNote = '';       // /状态 等本地提示，不落库
 
 function chatNearBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= 60;
@@ -512,12 +513,35 @@ async function answerDecision(id, value) {
   }
 }
 
+function clearFreeInput() {
+  freeDraft = '';
+  chatPinned = true;
+  const el = $('#freeInput');
+  if (el) { el.value = ''; autogrow(el); el.focus(); }
+}
+
+function statusSummary() {
+  const doing = state.tasks.filter(t => t.column === 'doing').length;
+  const blocked = state.tasks.filter(t => t.column === 'blocked').length;
+  const done = state.tasks.filter(t => t.column === 'done').length;
+  const failed = state.tasks.filter(t => {
+    const a = taskAlert(t);
+    return a && a.kind === 'failed';
+  }).length;
+  return `进行中 ${doing} · 待拍板 ${state.decisions.length} · 阻塞/失败 ${failed || blocked} · 已完成 ${done}`;
+}
+
 async function sendFreeMessage(text) {
   text = (text || '').trim();
   if (!text) return;
+  if (text[0] === '/') {
+    await runCommand(text);
+    return;
+  }
   try {
     await api('/api/message', { method: 'POST', body: { text, key: uid() } });
     // 先清掉草稿和当前框里的字，刷新后 renderInbox 才不会把旧内容填回去。
+    systemNote = '';
     freeDraft = '';
     chatPinned = true;
     const sent = $('#freeInput');
@@ -530,6 +554,81 @@ async function sendFreeMessage(text) {
     const fi = $('#freeInput');
     if (fi) fi.focus();
     if (e.message !== 'unauthorized') toast('发送失败：' + e.message, 'bad');
+  }
+}
+
+// 输入框指令只做三件事：看状态、建卡派人、挂待拍板。
+async function runCommand(text) {
+  const m = /^\/(状态|派|拍板)\s*([\s\S]*)$/.exec(text);
+  if (!m) {
+    toast('未知指令。可用：/状态、/派 X …、/拍板 T-1 …', 'bad');
+    return;
+  }
+  const cmd = m[1];
+  const rest = m[2].trim();
+  try {
+    if (cmd === '状态') {
+      systemNote = statusSummary();
+      renderInbox();
+      requestAnimationFrame(scrollChatBottom);
+      clearFreeInput();
+      return;
+    }
+
+    if (cmd === '派') {
+      const p = /^(\S+)\s+([\s\S]+)$/.exec(rest);
+      if (!p) { toast('用法：/派 Agent名 任务标题', 'bad'); return; }
+      const agent = p[1];
+      const title = p[2].trim();
+      const res = await api('/api/tasks', {
+        method: 'POST',
+        body: { title, agent, column: 'todo' },
+      });
+      const id = res.task.id;
+      await api('/api/message', {
+        method: 'POST',
+        body: { text: `派给 ${agent}：${title}`, task_id: id, key: uid() },
+      });
+      toast(`已建卡 ${id}，派给 ${agent}`);
+      systemNote = '';
+      await refreshTasks();
+      await refreshChat();
+      clearFreeInput();
+      return;
+    }
+
+    // /拍板 T-1 问题；只有一张进行中/阻塞卡时可以省略卡号。
+    let taskID = '';
+    let question = rest;
+    const t = /^(T-\d+)\s+([\s\S]+)$/i.exec(rest);
+    if (t) {
+      taskID = t[1].toUpperCase();
+      question = t[2].trim();
+    } else {
+      const open = state.tasks.filter(x => x.column === 'doing' || x.column === 'blocked');
+      if (open.length === 1 && rest) taskID = open[0].id;
+    }
+    if (!taskID || !question) {
+      toast('用法：/拍板 T-1 要决定什么', 'bad');
+      return;
+    }
+    await api('/api/decisions', {
+      method: 'POST',
+      body: { task_id: taskID, question, options: ['同意', '不同意'], key: uid() },
+    });
+    await api('/api/message', {
+      method: 'POST',
+      body: { text: `待拍板：${question}`, task_id: taskID, key: uid() },
+    });
+    toast(`已挂到 ${taskID}，等你拍板`);
+    systemNote = '';
+    await Promise.all([refreshTasks(), refreshDecisions()]);
+    await refreshChat();
+    clearFreeInput();
+  } catch (e) {
+    if (e.message !== 'unauthorized') toast(`指令失败：${e.message}`, 'bad');
+    const fi = $('#freeInput');
+    if (fi) fi.focus();
   }
 }
 
@@ -622,6 +721,8 @@ function renderInbox() {
 
   // 接口按新到旧返回；聊天流按 IM 习惯旧在上、新在下。
   const msgs = state.chat.slice().reverse();
+  const msgList = (msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>')
+    + (systemNote ? `<li class="msg-system">${esc(systemNote)}</li>` : '');
   el.innerHTML = `
     <div class="inbox-scroll" id="inboxScroll">
       <section class="inbox-section">
@@ -630,11 +731,11 @@ function renderInbox() {
       </section>
       <section class="inbox-section chat-section">
         <h2 class="sec-h">跟主会话说一句</h2>
-        <ul class="msg-list" id="msgList">${msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>'}</ul>
+        <ul class="msg-list" id="msgList">${msgList}</ul>
       </section>
     </div>
     <form class="free-compose" id="freeForm">
-      <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="不用挂任务，直接发…">${esc(freeDraft)}</textarea>
+      <textarea id="freeInput" rows="1" enterkeyhint="send" placeholder="发消息…（/ 开头看指令）">${esc(freeDraft)}</textarea>
       <button class="send-btn" type="submit" aria-label="发送">
         <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
       </button>

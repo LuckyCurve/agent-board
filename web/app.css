@@ -1066,6 +1066,17 @@ dialog.sheet:not([open]) { display: none; }
 }
 .msg-foot time { font-size: 10.5px; color: var(--faint); font-family: var(--font-mono); }
 .msg-empty { align-self: center; color: var(--faint); font-size: 12px; padding: 14px 2px; }
+.msg-system {
+  align-self: center;
+  max-width: 92%;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-align: center;
+}
 .msg-item.danger {
   border-color: color-mix(in srgb, var(--bad) 42%, var(--border-soft));
 }
