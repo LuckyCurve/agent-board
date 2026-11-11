@@ -91,6 +91,25 @@ func TestInboxHeightIsFlexNotCalc(t *testing.T) {
 	}
 }
 
+// 对话页的 .main 在纵向 flex 里必须显式给满宽。
+// 它有 margin: 0 auto，flex 里会被当成「不拉伸」，宽度退化成内容的 min-content：
+// 长消息里的 .mq-title（white-space: nowrap）把整页撑到 496，右对齐气泡被挤出屏幕。
+func TestInboxMainFillsWidth(t *testing.T) {
+	e := newTestEnv(t)
+	css := getPageBody(t, e, "/app.css")
+	start := strings.Index(css, `body[data-view="inbox"] .main {`)
+	if start < 0 {
+		t.Fatal("app.css 缺少对话页 .main 规则")
+	}
+	rule := css[start : strings.Index(css[start:], "}")+start]
+	if !strings.Contains(rule, "width: 100%") {
+		t.Fatalf("对话页 .main 必须 width: 100%%，否则 margin:auto 让它按 min-content 收缩\n%s", rule)
+	}
+	if !strings.Contains(rule, "overflow: hidden") {
+		t.Fatalf("对话页 .main 需要裁掉残余横向溢出\n%s", rule)
+	}
+}
+
 // 顶栏只留一个「设置」入口；测试消息、立即更新这类低频动作不再占位置。
 func TestTopbarHasSingleSettingsEntry(t *testing.T) {
 	e := newTestEnv(t)

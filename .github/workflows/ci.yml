@@ -30,6 +30,9 @@ jobs:
         run: node --test web/linkify.test.mjs
       - name: build
         run: go build -o agent-board .
+      # 375 宽对话页零横向溢出。ubuntu-latest 自带 Chrome。
+      - name: e2e (375 对话页无横向溢出)
+        run: node web/e2e/chat-overflow.mjs ./agent-board
       # 放在最后：npm ci 会拉出 node_modules，go 的 ./... 会把它当包扫进去。
       - name: web lint
         run: |

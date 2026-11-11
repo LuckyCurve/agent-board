@@ -608,6 +608,9 @@ body[data-view="inbox"] .topbar,
 body[data-view="inbox"] .filterbar { flex: none; }
 body[data-view="inbox"] .main {
   flex: 1 1 auto;
+  /* body 是纵向 flex，.main 上的 margin:auto 会把它从「拉伸」改成「按内容收缩」，
+     于是长消息的 min-content 决定宽度，整页横向溢出。显式给满宽即可。 */
+  width: 100%;
   min-height: 0;
   height: auto;
   display: flex;
