@@ -10,3 +10,5 @@
 | 不能编译 SQLite 驱动 | 本机没有 gcc | 用纯 Go 驱动 `modernc.org/sqlite` |
 | 前端漏一个变量声明就上线，用户直接发不出消息 | 整段重写 web/app.js 时把 `let uploadingImages` 一起带没了 | CI 跑 `node --check` + eslint `no-undef`/`no-unused-vars`（web/ 有 eslint.config.mjs），漏声明直接红 |
 | 推送在 Chrome/iOS 上收不到 | webpush-go v1.4.0 用的是旧版加密格式（盐塞在正文里），现代推送服务只认 RFC 8291 | 服务端自己按 RFC 8291 加密：盐进 `Encryption` 头、服务端公钥进 `Crypto-Key` 头、正文只留密文；`push_chain_test.go` 按浏览器的算法解密验原文 |
+| 推送在 iPhone 上收不到，Chrome 上却正常 | VAPID 的 `sub` 写死成 `mailto:...@localhost`，Apple 直接拒整个 JWT（403 BadJwtToken）；Chrome 不挑这个 | `sub` 改成 `VAPID_SUB` / `--vapid-sub` 可配，默认按站点域名推一个；`push_vapid_test.go` 锁住「只用 mailto:/https:、不含 localhost」 |
+| 推送失败时日志里一行都没有 | 非 404/410 的失败只做了计数，没写日志 | 失败一律 `log.Printf` 状态码 + 响应正文（长串打码、endpoint 只留主机名） |
