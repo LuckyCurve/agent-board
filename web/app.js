@@ -49,6 +49,9 @@ function saveFilters() {
 let openTaskId = null;
 let detailFromSeq = null;  // 从对话点进来的消息 seq，用于返回上下文
 let detailReturnFocus = null; // 关掉详情后把焦点还给原来那张卡
+// 最近一次操作是键盘还是指针：详情打开时据此决定要不要把焦点放到标题上。
+// 指针点开还去聚焦标题，浏览器会画一圈焦点环，看着像整块被选中。
+let lastInputKind = '';
 let freeDraft = '';
 let refreshTimer = null;
 let es = null;
@@ -630,15 +633,28 @@ async function openTask(id, fromSeq) {
   openTaskId = id;
   detailFromSeq = fromSeq || null;
   const dlg = $('#detail');
-  if (!dlg.open) {
+  const wasOpen = dlg.open;
+  if (!wasOpen) {
     const ae = document.activeElement;
     detailReturnFocus = ae && ae.closest && ae.closest('.card') ? ae : null;
     dlg.showModal();
   }
   await refreshDetail(id, false);
-  // 打开时焦点落在标题上，键盘用户 Tab 才进返回/操作按钮。
+  // 指针点开的详情别去碰焦点：标题一被聚焦，浏览器就画一圈焦点环（Safari 更像整块被选中）。
+  // 键盘打开才把焦点放到标题上，Tab 才接得下去。焦点本来就在对话框里（showModal 给的）。
   const title = $('#d-title');
-  if (title) title.focus({ preventScroll: true });
+  if (title && lastInputKind === 'keyboard') {
+    title.focus({ preventScroll: true });
+  } else if (!dlg.contains(document.activeElement)) {
+    // 详情里再点胶囊时，原来那个按钮已经被重画掉，焦点会掉到 body；挪回关闭键。
+    const back = $('#sheetClose');
+    if (back) back.focus({ preventScroll: true });
+  }
+  // 双击胶囊时那一瞬的选区会留在对话框后面的页面上，看着像标题被选中了；开详情时顺手清掉。
+  if (!wasOpen) {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) sel.removeAllRanges();
+  }
   // 默认从标题看起；#task=T-1&bottom=1 直接落到底部的回复状态（深链/截图用）。
   const body = $('#sheetBody');
   if (body) body.scrollTop = location.hash.includes('bottom=1') ? body.scrollHeight : 0;
@@ -1747,6 +1763,13 @@ let bound = false;
 function bindUI() {
   if (bound) return;
   bound = true;
+
+  // 记下最后一次输入是键盘还是指针：详情打开时据此决定要不要聚焦标题。
+  // 用捕获阶段，先于所有 click 处理跑，openTask 里读到的就是这次操作本身。
+  const noteInput = kind => () => { lastInputKind = kind; };
+  document.addEventListener('keydown', noteInput('keyboard'), true);
+  document.addEventListener('pointerdown', noteInput('pointer'), true);
+  document.addEventListener('touchstart', noteInput('pointer'), { capture: true, passive: true });
 
   $('#themeToggle').addEventListener('click', () => { toggleTheme(); renderSettings(); });
   $('#pushToggle').addEventListener('click', async () => { await togglePush(); renderSettings(); });

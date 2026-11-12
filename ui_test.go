@@ -269,6 +269,33 @@ func TestDetailTitleIsFocusable(t *testing.T) {
 	}
 }
 
+// 点胶囊进详情时标题不能自带焦点环（看着像被选中）；键盘进来仍要能聚焦。
+func TestDetailFocusDependsOnInputKind(t *testing.T) {
+	e := newTestEnv(t)
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{
+		"lastInputKind",                // 记住这次是键盘还是指针
+		"lastInputKind === 'keyboard'", // 只有键盘才把焦点放到标题
+		"sel.removeAllRanges()",        // 打开时清掉双击留下的选区
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js 缺 %s", want)
+		}
+	}
+	// 正文不能被 user-select:none 一刀切——那会连复制一起废掉。
+	css := getPageBody(t, e, "/app.css")
+	for _, sel := range []string{".detail-title", ".msg-text", ".tl-body"} {
+		i := strings.Index(css, sel+" {")
+		if i < 0 {
+			continue
+		}
+		block := css[i : strings.Index(css[i:], "}")+i]
+		if strings.Contains(block, "user-select: none") {
+			t.Fatalf("%s 不能用 user-select:none，复制会一起废掉", sel)
+		}
+	}
+}
+
 func TestCardsHaveNoComposerAndCanBeQuoted(t *testing.T) {
 	e := newTestEnv(t)
 	body := getPageBody(t, e, "/")
