@@ -11,7 +11,7 @@ import (
 // 标签只存关键词本身，「项目:财富」这种前缀形式由前端拼。
 
 func normalizeTag(tag string) string {
-	return strings.TrimSpace(tag)
+	return strings.TrimSpace(toUTF8(tag))
 }
 
 // SetTaskTags 整份替换一张卡的标签。
@@ -155,7 +155,7 @@ func (s *Store) attachTags(tasks []Task) error {
 
 // AssignTask 把卡转交给另一个 Agent，留一条事件说明。
 func (s *Store) AssignTask(taskID, agent, key string) (Task, error) {
-	agent = strings.TrimSpace(agent)
+	agent = cleanText(agent)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Task{}, err

@@ -1,4 +1,4 @@
-const CACHE = 'agent-board-v8';
+const CACHE = 'agent-board-v9';
 const SHELL = ['/app.css', '/app.js', '/linkify.js', '/login.js', '/theme.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {

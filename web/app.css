@@ -429,6 +429,54 @@ svg { display: block; }
 
 /* ---------- board ---------- */
 
+/* 看板顶部的归档入口。归档原来占看板第 5 列，桌面宽屏下折到第二行、
+   两千多像素之外，等于没有入口。改成一条细栏，一直在视野里。 */
+.board-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 0 12px;
+}
+.bb-archive {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+}
+.bb-archive:hover { color: var(--text); border-color: var(--border); }
+.bb-archive svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.bb-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* 已完成的卡上直接给归档按钮，不用先进详情。 */
+.card-archive {
+  margin-left: auto;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.card-archive:hover { color: var(--text); border-color: var(--accent); }
+.card-archive + .card-quote { margin-left: 6px; }
+
 .board {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1963,6 +2011,8 @@ dialog.sheet:not([open]) { display: none; }
   .live { padding: 0 9px; }
   /* 手机上顶栏只留 logo，腾出位置给通知相关的按钮。 */
   .brand-name { display: none; }
+  /* 归档栏在手机上贴着顶栏，省点竖向空间。 */
+  .board-bar { padding-bottom: 10px; }
 
   .filterbar { padding: 6px 14px; gap: 8px; display: block; }
   .filterbar .agent-select { height: 30px; max-width: 180px; font-size: 12px; }

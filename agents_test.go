@@ -104,6 +104,45 @@ func TestTaskTags(t *testing.T) {
 	}
 }
 
+// 中文 Windows 控制台会把中文参数写成 GBK 字节；进来要扶正成 UTF-8，
+// 不然网页上全是乱码（命令行看着正常，因为它按 GBK 解）。
+func TestGarbledConsoleInputIsRepaired(t *testing.T) {
+	e := newTestEnv(t)
+	// "筛选" 的 GBK 字节 C9 B8 D1 A1，被当成 Latin-1 读进来就是 ɸѡ。
+	code, body, _ := e.req(t, "POST", "/api/tasks", map[string]any{
+		"title": "标签筛选乱码", "project": "看板", "agent": "开发", "column": "todo"})
+	if code != http.StatusCreated {
+		t.Fatalf("建卡: %d %v", code, body)
+	}
+	id := body["task"].(map[string]any)["id"].(string)
+
+	code, body, _ = e.req(t, "POST", "/api/tasks/"+id+"/tags", map[string]any{
+		"add": []string{"ɸѡ"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("加标签: %d %v", code, body)
+	}
+	tags := body["task"].(map[string]any)["tags"].([]any)
+	if len(tags) != 1 || tags[0] != "筛选" {
+		t.Fatalf("GBK 字节的标签该被扶正成「筛选」，实际 %v", tags)
+	}
+
+	// 正常中文不能被反过来打坏。
+	code, body, _ = e.req(t, "POST", "/api/tasks/"+id+"/tags", map[string]any{
+		"add": []string{"界面"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("加标签: %d %v", code, body)
+	}
+	got := map[string]bool{}
+	for _, x := range body["task"].(map[string]any)["tags"].([]any) {
+		got[x.(string)] = true
+	}
+	if !got["界面"] {
+		t.Fatalf("正常中文标签被改坏了: %v", body["task"])
+	}
+}
+
 // 转交：卡片换主人，并且留下一条事件说明来龙去脉。
 func TestTaskTransferKeepsTrail(t *testing.T) {
 	e := newTestEnv(t)

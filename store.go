@@ -415,7 +415,11 @@ func touchTask(tx *sql.Tx, taskID string, seq int64) error {
 }
 
 func (s *Store) CreateTask(title, project, agent, column, key string) (Task, error) {
-	title = strings.TrimSpace(title)
+	// 中文 Windows 控制台会把中文参数写成 GBK 字节，进来先扶正成 UTF-8，
+	// 不然网页上全是乱码。标签走同一套（normalizeTag 里也调）。
+	title = cleanText(title)
+	project = cleanText(project)
+	agent = cleanText(agent)
 	if title == "" {
 		return Task{}, errors.New("title required")
 	}

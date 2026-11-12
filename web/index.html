@@ -82,6 +82,13 @@
 
 <main class="main">
   <section class="view" id="view-board" role="tabpanel" aria-label="看板">
+    <div class="board-bar" id="boardBar">
+      <button class="bb-archive" id="boardArchive" title="把已完成的卡收进归档">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M3 4h18v4H3z"/><path d="M10 12h4"/></svg>
+        <span>归档</span>
+        <span class="bb-count" id="boardArchiveCount">0</span>
+      </button>
+    </div>
     <div class="board" id="board"></div>
   </section>
 

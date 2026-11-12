@@ -4,12 +4,13 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+// 归档不在看板里占一列：桌面宽屏下它会折到第二行、几千像素之外，等于没有入口。
+// 改成看板顶部一条细栏，点一下进归档页；每张已完成的卡上再给一个直接归档的按钮。
 const COLUMNS = [
   { key: 'todo', label: '待办' },
   { key: 'doing', label: '进行中' },
   { key: 'blocked', label: '阻塞' },
   { key: 'done', label: '已完成' },
-  { key: 'archived', label: '归档' },
 ];
 
 const state = {
@@ -217,6 +218,7 @@ async function refreshArchived() {
   const data = await api('/api/tasks?view=archived');
   state.archived = data.tasks || [];
   renderFilterBar();
+  renderBoardArchive();
   if (state.view === 'archive') renderArchive();
 }
 
@@ -247,7 +249,7 @@ function renderArchive() {
   const el = $('#archiveList');
   if (!el) return;
   const all = state.archived;
-  const list = all.filter(matchTask);
+  const list = all;
   const n = list.length;
   const count = $('#archiveCount');
   if (count) count.textContent = String(n);
@@ -262,9 +264,7 @@ function renderArchive() {
       <button class="btn ghost danger" data-delete="${esc(t.id)}">删除</button>
     </div>
   </article>`).join('')
-    : (all.length
-      ? '<div class="empty"><div class="e-title">没有匹配的归档</div><div class="e-sub">换个筛选条件试试</div></div>'
-      : '<div class="empty"><div class="e-title">还没有归档</div><div class="e-sub">把看板最右「归档」列里的卡片拖过去，或在卡片详情里一键归档</div></div>');
+    : '<div class="empty"><div class="e-title">还没有归档</div><div class="e-sub">在已完成的卡上点「归档」，或在卡片详情里收进归档</div></div>';
 }
 
 async function refreshDecisions() {
@@ -312,6 +312,8 @@ function taskTags(t) {
   return out;
 }
 
+// 标签筛选只归看板管：归档和对话里按标签筛会把内容藏得没头没尾，
+// 用户在那儿找不到刚才还在的东西。Agent 切换器同理，只筛看板。
 function matchTask(t) {
   if (state.filterAgent && t.agent !== state.filterAgent) return false;
   if (state.filterTags.length) {
@@ -325,10 +327,17 @@ function filterActive() {
   return !!(state.filterAgent || state.filterTags.length);
 }
 
-// 筛选行上的标签：项目 + 自定义标签，去重排序。
+// 筛选条只在看板页出现；切到对话/归档/日历就收起来，免得以为它在管那些页面。
+function syncFilterBar() {
+  const bar = $('#filterBar');
+  if (bar) bar.hidden = state.view !== 'board';
+}
+
+// 筛选行上的标签：项目 + 自定义标签，去重排序。只取看板上的卡——
+// 归档里的标签筛不到任何东西，列出来只会让人点了发现没反应。
 function allFilterTags() {
   const set = new Set();
-  state.tasks.concat(state.archived).forEach(t => taskTags(t).forEach(x => set.add(x)));
+  state.tasks.forEach(t => taskTags(t).forEach(x => set.add(x)));
   return Array.from(set).sort((a, b) => a.localeCompare(b, 'zh'));
 }
 
@@ -374,8 +383,6 @@ function toggleTag(tag) {
   saveFilters();
   renderFilterBar();
   renderBoard();
-  renderArchive();
-  if (state.view === 'inbox') renderInbox();
 }
 
 function clearFilters() {
@@ -384,8 +391,6 @@ function clearFilters() {
   saveFilters();
   renderFilterBar();
   renderBoard();
-  renderArchive();
-  if (state.view === 'inbox') renderInbox();
   toast('已清除筛选');
 }
 
@@ -479,6 +484,7 @@ function cardHTML(t) {
       ${t.agent ? `<span class="chip ghost">${esc(t.agent)}</span>` : ''}
       ${(t.tags || []).map(x => `<span class="chip tag">${esc(x)}</span>`).join('')}
       ${t.pending_decisions > 0 ? `<span class="badge warn">待拍板 ${t.pending_decisions}</span>` : ''}
+      ${t.column === 'done' ? `<button type="button" class="card-archive" data-archive="${esc(t.id)}" title="收进归档">归档</button>` : ''}
       <button type="button" class="card-quote" data-quote="${esc(t.id)}">引用</button>
     </div>
   </article>`;
@@ -489,7 +495,7 @@ function renderBoard() {
   if (!board) return;
   const filtered = filterActive();
   board.innerHTML = COLUMNS.map(col => {
-    const items = col.key === 'archived' ? [] : state.tasks.filter(t => t.column === col.key && matchTask(t));
+    const items = state.tasks.filter(t => t.column === col.key && matchTask(t));
     const empty = filtered ? '没有匹配的卡片' : '暂无任务';
     return `<section class="column" data-col="${col.key}" data-drop="1">
       <header class="col-head">
@@ -498,11 +504,20 @@ function renderBoard() {
         <span class="col-count">${items.length}</span>
       </header>
       <div class="col-body">
-        ${col.key === 'archived' ? '<div class="col-empty">把卡片拖到这里归档</div>' :
-          (items.length ? items.map(cardHTML).join('') : `<div class="col-empty">${empty}</div>`)}
+        ${items.length ? items.map(cardHTML).join('') : `<div class="col-empty">${empty}</div>`}
       </div>
     </section>`;
   }).join('');
+  renderBoardArchive();
+}
+
+// 看板顶部的归档入口：带上当前有多少张卡在归档里，点进去是归档页。
+function renderBoardArchive() {
+  const n = state.archived.length;
+  const btn = $('#boardArchive');
+  const count = $('#boardArchiveCount');
+  if (count) count.textContent = String(n);
+  if (btn) btn.title = n ? `归档里有 ${n} 张卡，点开查看` : '还没有归档的卡';
 }
 
 function skeletonBoard() {
@@ -1219,14 +1234,7 @@ function renderInbox() {
     : `<div class="empty"><svg viewBox="0 0 24 24"><path d="M4 13.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7.5"/><path d="M4 13.5h4.2l1.4 2.2h4.8l1.4-2.2H20V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
         <div class="e-title">没有待拍板项</div><div class="e-sub">需要你决定的事会出现在这里</div></div>`;
 
-  // 挂了卡的消息跟着筛选走；没挂卡的自由对话一直看得见。
-  const msgs = state.chat.slice().reverse().filter(m => {
-    if (!filterActive()) return true;
-    const tid = m.link_task || m.task_id;
-    if (!tid) return true;
-    const t = taskById(tid);
-    return t ? matchTask(t) : true;
-  });
+  const msgs = state.chat.slice().reverse();
   const msgList = (msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>')
     + (systemNote ? `<li class="msg-system">${esc(systemNote)}</li>` : '');
   const scrollHTML = `
@@ -1391,6 +1399,7 @@ function setView(v, fromHash) {
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
   window.scrollTo(0, 0);
+  syncFilterBar();
 
   if (v === 'board') renderBoard();
   if (v === 'inbox') { renderInbox(); refreshChat().catch(() => {}); }
@@ -1628,7 +1637,7 @@ async function boot({ keepUI } = {}) {
   bindUI();
   installViewport();
   try {
-    await Promise.all([refreshTasks(), refreshDecisions(), refreshAgents()]);
+    await Promise.all([refreshTasks(), refreshArchived(), refreshDecisions(), refreshAgents()]);
     renderFilterBar();
     const v = viewFromHash();
     setView(v, true);
@@ -1705,8 +1714,6 @@ function bindUI() {
       saveFilters();
       renderFilterBar();
       renderBoard();
-      renderArchive();
-      if (state.view === 'inbox') renderInbox();
     });
   }
   const calAgents = $('#calAgents');
@@ -1750,9 +1757,13 @@ function bindUI() {
     if (e.target.closest('.lnk')) return;  // 卡片摘要里的链接自己开新标签
     const q = e.target.closest('[data-quote]');
     if (q) { quoteTask(q.dataset.quote); return; }
+    const arch = e.target.closest('[data-archive]');
+    if (arch) { moveTask(arch.dataset.archive, 'archived', '已收进归档'); return; }
     const card = e.target.closest('.card');
     if (card) openTask(card.dataset.id);
   });
+  const boardArchive = $('#boardArchive');
+  if (boardArchive) boardArchive.addEventListener('click', () => setView('archive'));
   $('#archiveList').addEventListener('click', e => {
     const restore = e.target.closest('[data-restore]');
     if (restore) { moveTask(restore.dataset.restore, 'done', '已恢复到已完成'); return; }

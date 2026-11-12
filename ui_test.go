@@ -327,8 +327,47 @@ func TestDetailHasTagsAndTransfer(t *testing.T) {
 	}
 }
 
-// 噪点层不能跟着视口重画：SVG feTurbulence 每次生成的随机图案都不同，
-// 整层 fixed 时每滚一帧都重画一次，看板页靠近顶部就会一直闪。
+// 标签筛选只在看板页生效：归档、对话不按标签收窄，筛选条也只在该页出现。
+func TestTagFilterIsBoardOnly(t *testing.T) {
+	e := newTestEnv(t)
+	js := getPageBody(t, e, "/app.js")
+	if strings.Contains(js, "all.filter(matchTask)") {
+		t.Fatal("归档页不该再按标签筛选，否则归档里的卡会凭空消失")
+	}
+	if !strings.Contains(js, "const msgs = state.chat.slice().reverse();") {
+		t.Fatal("对话页不该按标签筛消息，聊天上下文要完整")
+	}
+	if !strings.Contains(js, "function syncFilterBar()") ||
+		!strings.Contains(js, "bar.hidden = state.view !== 'board'") {
+		t.Fatal("筛选条只该在看板页出现")
+	}
+	if !strings.Contains(js, "syncFilterBar();") {
+		t.Fatal("切页时要同步筛选条的可见性")
+	}
+}
+
+// 桌面端要有能摸到的归档入口：已完成的卡上直接给按钮，看板顶部有条归档栏。
+func TestDoneCardsOfferArchiveOnDesktop(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	if !strings.Contains(body, `id="boardArchive"`) {
+		t.Fatal("看板顶部要有归档入口")
+	}
+	js := getPageBody(t, e, "/app.js")
+	if !strings.Contains(js, `data-archive="${esc(t.id)}"`) ||
+		!strings.Contains(js, "t.column === 'done'") {
+		t.Fatal("已完成的卡上要有直接归档的按钮")
+	}
+	if !strings.Contains(js, "const COLUMNS = [") || strings.Contains(js, "key: 'archived'") {
+		t.Fatal("归档不该再占看板一列——宽屏下会折到第二行，等于没有入口")
+	}
+	css := getPageBody(t, e, "/app.css")
+	for _, want := range []string{".board-bar", ".bb-archive", ".card-archive"} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("app.css 缺 %s", want)
+		}
+	}
+}
 func TestGrainLayerScrollsWithContent(t *testing.T) {
 	e := newTestEnv(t)
 	css := getPageBody(t, e, "/app.css")
