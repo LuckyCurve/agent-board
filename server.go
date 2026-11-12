@@ -149,7 +149,11 @@ func (s *Server) withHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
-				"script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+				"script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		// 只在确实是 HTTPS 时下发，免得本机 http 开发被浏览器记死。
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			h.Set("Strict-Transport-Security", "max-age=15552000; includeSubDomains")
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			h.Set("Cache-Control", "no-store")
 		}
@@ -180,15 +184,32 @@ func (s *Server) hasSession(r *http.Request) bool {
 	return ok
 }
 
-// apiTokenValue 每次请求都读文件，token 轮换后立即生效。
-func (s *Server) apiTokenValue() string {
+// apiTokenValues 每次请求都读文件，token 轮换后立即生效。
+// 文件第一行是当前令牌，后面几行是轮换前的旧令牌（宽限期内仍可用），
+// 这样轮换是一次原子写，CLI 不会在换的瞬间全 401。
+func (s *Server) apiTokenValues() []string {
 	if s.cfg.Token != "" {
-		return s.cfg.Token
+		return []string{s.cfg.Token}
 	}
-	if s.cfg.TokenFile != "" {
-		if b, err := os.ReadFile(s.cfg.TokenFile); err == nil {
-			return strings.TrimSpace(string(b))
+	if s.cfg.TokenFile == "" {
+		return nil
+	}
+	b, err := os.ReadFile(s.cfg.TokenFile)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			out = append(out, t)
 		}
+	}
+	return out
+}
+
+func (s *Server) apiTokenValue() string {
+	if v := s.apiTokenValues(); len(v) > 0 {
+		return v[0]
 	}
 	return ""
 }
@@ -202,11 +223,17 @@ func bearerToken(r *http.Request) string {
 }
 
 func (s *Server) validToken(token string) bool {
-	want := s.apiTokenValue()
-	if token == "" || want == "" {
+	if token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
+	ok := false
+	for _, want := range s.apiTokenValues() {
+		// 不提前 return，别让响应时间暴露匹配到第几行。
+		if subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1 {
+			ok = true
+		}
+	}
+	return ok
 }
 
 // hasToken 只看 Agent token，不认网页登录态。
@@ -233,15 +260,21 @@ const mainIdentity = "main"
 
 // agentScope 决定这个请求能碰哪些 Agent 的卡。
 // 身份优先取请求头（同一令牌可代表不同 Agent），没带才退回令牌绑定的 Agent。
+// agentScope 决定这个请求能碰哪些 Agent 的卡。
+// 身份头只对主会话本人有效（网页登录态或主令牌）——绑定了 Agent 的令牌
+// 换个头就能看别人的卡，那等于没有隔离。
 func (s *Server) agentScope(r *http.Request) string {
-	if id := strings.TrimSpace(r.Header.Get(identityHeader)); id != "" {
-		if strings.EqualFold(id, mainIdentity) {
-			return ""
+	if s.isMainCaller(r) {
+		if id := strings.TrimSpace(r.Header.Get(identityHeader)); id != "" {
+			if strings.EqualFold(id, mainIdentity) {
+				return ""
+			}
+			return id
 		}
-		return id
+		return ""
 	}
 	token := bearerToken(r)
-	if token == "" || s.validToken(token) {
+	if token == "" {
 		return ""
 	}
 	agent, ok, err := s.store.AgentForToken(sessionHash(token))
@@ -249,6 +282,12 @@ func (s *Server) agentScope(r *http.Request) string {
 		return ""
 	}
 	return agent
+}
+
+// isMainCaller：持有主令牌。绑定令牌不算——它换个身份头就能看别人的卡，
+// 那等于没有隔离。
+func (s *Server) isMainCaller(r *http.Request) bool {
+	return s.validToken(bearerToken(r))
 }
 
 // ownsTask 判断请求能不能动这张卡。
@@ -316,18 +355,46 @@ func (s *Server) clearSession(w http.ResponseWriter) {
 	})
 }
 
+// clientIP 取真实来源地址。服务只该被反向代理访问，代理后面 RemoteAddr
+// 永远是 127.0.0.1，所以只信任来自本机的 X-Forwarded-For。
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if host != "127.0.0.1" && host != "::1" {
+		return host
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// 取最右一段：它是最近一跳代理看到的地址，客户端无法伪造。
+		parts := strings.Split(xff, ",")
+		if ip := strings.TrimSpace(parts[len(parts)-1]); ip != "" {
+			return ip
+		}
+	}
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+		return ip
 	}
 	return host
+}
+
+// loginBucket 把内存桶和落库记录合起来判断：内存桶负责快速拒绝，
+// 落库记录保证重启之后别人仍然打不进来。
+func (s *Server) loginBucket(ip string) (bool, time.Duration) {
+	if blocked, wait := s.loginRate.status(ip); blocked {
+		return true, wait
+	}
+	n, err := s.store.LoginFailuresSince(ip, time.Now().Add(-s.loginRate.window))
+	if err == nil && n >= s.loginRate.limit {
+		return true, s.loginRate.window
+	}
+	return false, 0
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	ip := clientIP(r)
-	if blocked, wait := s.loginRate.status(ip); blocked {
+	if blocked, wait := s.loginBucket(ip); blocked {
 		secs := int(wait.Seconds())
 		if secs < 1 {
 			secs = 1
@@ -351,6 +418,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !verifyPassword(passHash, req.Password) {
 		s.loginRate.fail(ip)
+		_ = s.store.AddLoginFailure(ip, time.Now())
+		log.Printf("login: 失败 ip=%s", ip)
 		if s.cfg.LoginDelay > 0 {
 			time.Sleep(s.cfg.LoginDelay)
 		}
@@ -367,6 +436,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loginRate.reset(ip)
+	_ = s.store.ClearLoginFailures(ip)
+	log.Printf("login: 成功 ip=%s", ip)
 	s.setSession(w, token)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -1210,6 +1281,8 @@ func (s *Server) servePage(w http.ResponseWriter, name string) {
 		http.Error(w, "404 page not found", http.StatusNotFound)
 		return
 	}
+	// /api/* 只认 Bearer token（网页登录态不能代替），所以页面得带上令牌。
+	// 只有已登录的会话才拿得到 index.html，未登录会被重定向到 /login。
 	if name == "index.html" {
 		tag := ""
 		if tok := s.apiTokenValue(); tok != "" {

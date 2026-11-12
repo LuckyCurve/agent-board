@@ -16,17 +16,7 @@
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="stylesheet" href="/app.css">
-<script>
-(function () {
-  try {
-    var q = new URLSearchParams(location.search).get('theme');
-    var saved = q || localStorage.getItem('ab-theme');
-    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-    if (q) localStorage.setItem('ab-theme', q);
-    if (dark) document.documentElement.classList.add('dark-theme');
-  } catch (e) {}
-})();
-</script>
+<script src="/theme.js"></script>
 </head>
 <body>
 

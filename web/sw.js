@@ -1,5 +1,5 @@
-const CACHE = 'agent-board-v5';
-const SHELL = ['/app.css', '/app.js', '/linkify.js', '/login.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'agent-board-v6';
+const SHELL = ['/app.css', '/app.js', '/linkify.js', '/login.js', '/theme.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

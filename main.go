@@ -12,6 +12,9 @@ import (
 
 const version = "0.1.0"
 
+// maxTokenGrace 是 token 文件里最多保留几个旧令牌（宽限期用）。
+const maxTokenGrace = 3
+
 type paths struct {
 	data           string
 	db             string
@@ -176,10 +179,30 @@ func ensureToken(path, provided string) (generated string, err error) {
 	return generated, nil
 }
 
+// writeTokenFile 原子写令牌文件：第一个是当前令牌，其余是宽限期内的旧令牌。
+func writeTokenFile(path string, tokens ...string) error {
+	var lines []string
+	for _, t := range tokens {
+		if t = strings.TrimSpace(t); t != "" {
+			lines = append(lines, t)
+		}
+	}
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func cmdToken(args []string) {
 	fs := flag.NewFlagSet("token", flag.ExitOnError)
 	dataFlag := fs.String("data", "", "data directory")
 	rotate := fs.Bool("new", false, "generate a new token")
+	prune := fs.Bool("prune", false, "drop grace-period tokens, leaving only the current one")
 	agent := fs.String("agent", "", "bind a new token to this agent (it only sees that agent's cards)")
 	fs.Parse(args)
 	p, err := resolvePaths(*dataFlag, "")
@@ -209,11 +232,33 @@ func cmdToken(args []string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := os.WriteFile(p.token, []byte(tok+"\n"), 0o600); err != nil {
+		// 旧令牌留一行做宽限：先写临时文件再 rename，一次原子替换。
+		// 换的瞬间 CLI 手里还是旧值也能继续用，拿到新值后自动切过去。
+		lines := []string{tok}
+		if old, err := os.ReadFile(p.token); err == nil {
+			for _, line := range strings.Split(string(old), "\n") {
+				if t := strings.TrimSpace(line); t != "" && t != tok && len(lines) <= maxTokenGrace {
+					lines = append(lines, t)
+				}
+			}
+		}
+		if err := writeTokenFile(p.token, lines...); err != nil {
 			log.Fatal(err)
 		}
-		fmt.Fprintln(os.Stderr, "new token written to "+p.token)
+		fmt.Fprintf(os.Stderr, "new token written to %s（旧令牌仍可用 %d 个，`token --prune` 清掉）\n", p.token, len(lines)-1)
 		fmt.Println(tok)
+		return
+	}
+	if *prune {
+		b, err := os.ReadFile(p.token)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cur := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+		if err := writeTokenFile(p.token, cur); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "旧令牌已全部作废")
 		return
 	}
 	b, err := os.ReadFile(p.token)
@@ -257,7 +302,7 @@ func usage() {
 	fmt.Print(`agent-board — 本地 Agent 任务看板
 
   agent-board serve [--addr 127.0.0.1:8765] [--password ...] [--token ...]
-  agent-board token [--new]              # 查看 / 重发 Agent token
+  agent-board token [--new] [--prune]      # 查看 / 换发 Agent token（旧令牌留宽限期）
   agent-board task new --title "..." [--project ...] [--agent ...] [--column todo]
   agent-board task list [--json]
   agent-board task show T-1

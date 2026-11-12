@@ -137,10 +137,12 @@ function toast(msg, kind = '') {
 
 /* ---------- api ---------- */
 
-const API_TOKEN = (document.querySelector('meta[name="api-token"]') || {}).content || '';
+// 鉴权走同源会话 cookie，页面里不再内嵌主令牌。
+// 旧页面若还带着 meta token，也照旧发出去——服务端两边都认，刷新前后都能用。
+const LEGACY_TOKEN = (document.querySelector('meta[name="api-token"]') || {}).content || '';
 
 function authHeaders(extra) {
-  return Object.assign(API_TOKEN ? { Authorization: 'Bearer ' + API_TOKEN } : {}, extra || {});
+  return Object.assign(LEGACY_TOKEN ? { Authorization: 'Bearer ' + LEGACY_TOKEN } : {}, extra || {});
 }
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -1424,7 +1426,9 @@ function connectSSE() {
   if (es) return;
   const live = $('#live');
   const since = lastEventSeq ? '&since=' + lastEventSeq : '';
-  es = new EventSource('/api/stream?token=' + encodeURIComponent(API_TOKEN) + since);
+  // 登录态走 cookie；旧页面留下的 token 一并带上，刷新前后都能连。
+  const tok = LEGACY_TOKEN ? 'token=' + encodeURIComponent(LEGACY_TOKEN) + '&' : '';
+  es = new EventSource('/api/stream?' + tok + since.replace(/^&/, ''));
   es.addEventListener('hello', e => {
     try {
       const d = JSON.parse(e.data);

@@ -194,6 +194,11 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
   agent TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS login_failures (
+  ip TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_failures_at ON login_failures(at);
 `)
 	if err != nil {
 		return err
@@ -1105,6 +1110,38 @@ func (s *Store) RecentReplies(limit int, freeOnly bool, agent string) ([]Reply, 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ---- login failures ----
+
+// AddLoginFailure 记一次失败登录。只存来源和时间，不存口令。
+func (s *Store) AddLoginFailure(ip string, at time.Time) error {
+	if _, err := s.db.Exec(`INSERT INTO login_failures(ip, at) VALUES(?,?)`, ip, at.Unix()); err != nil {
+		return err
+	}
+	// 顺手清掉一天前的记录，表不会一直长。
+	_, _ = s.db.Exec(`DELETE FROM login_failures WHERE at<?`, at.Add(-24*time.Hour).Unix())
+	return nil
+}
+
+// LoginFailuresSince 数某个来源在窗口内失败了几次。存库里，重启不清零。
+func (s *Store) LoginFailuresSince(ip string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM login_failures WHERE ip=? AND at>=?`,
+		ip, since.Unix()).Scan(&n)
+	return n, err
+}
+
+// ClearLoginFailures 登录成功后清掉这个来源的记录。
+func (s *Store) ClearLoginFailures(ip string) error {
+	_, err := s.db.Exec(`DELETE FROM login_failures WHERE ip=?`, ip)
+	return err
+}
+
+// PruneLoginFailures 丢掉窗口外的记录，避免表一直长。
+func (s *Store) PruneLoginFailures(before time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM login_failures WHERE at<?`, before.Unix())
+	return err
 }
 
 // ---- consumer cursor / lease ----
