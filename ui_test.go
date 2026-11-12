@@ -110,6 +110,28 @@ func TestInboxMainFillsWidth(t *testing.T) {
 	}
 }
 
+// 桌面两侧留白也得能滚：滚动容器必须占满整宽，收窄交给里面的内容。
+func TestInboxScrollAreaSpansFullWidth(t *testing.T) {
+	e := newTestEnv(t)
+	css := getPageBody(t, e, "/app.css")
+	start := strings.Index(css, `body[data-view="inbox"] .inbox {`)
+	if start < 0 {
+		t.Fatal("app.css 缺少对话页 .inbox 规则")
+	}
+	rule := css[start : strings.Index(css[start:], "}")+start]
+	if strings.Contains(rule, "max-width: 780px") {
+		t.Fatalf("对话页 .inbox 不能自己收窄，否则两侧留白不属于滚动区，滚轮在上面没反应\n%s", rule)
+	}
+	if !strings.Contains(rule, "max-width: none") {
+		t.Fatalf("对话页 .inbox 必须占满整宽\n%s", rule)
+	}
+	// 内容本身仍收窄居中。
+	if !strings.Contains(css, "body[data-view=\"inbox\"] .inbox-section") ||
+		!strings.Contains(css, "max-width: 780px") {
+		t.Fatal("对话页内容仍应收窄到 780 并居中")
+	}
+}
+
 // 顶栏只留一个「设置」入口；测试消息、立即更新这类低频动作不再占位置。
 func TestTopbarHasSingleSettingsEntry(t *testing.T) {
 	e := newTestEnv(t)

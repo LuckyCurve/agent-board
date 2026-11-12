@@ -634,7 +634,11 @@ body[data-view="inbox"] #view-inbox .page-head {
   margin-left: auto;
   margin-right: auto;
 }
-body[data-view="inbox"] .inbox { flex: 1; min-height: 0; width: 100%; max-width: 780px; margin: 0 auto; gap: 10px; }
+/* 收件箱：滚动容器占满整宽，两侧留白也算它的地盘，鼠标停在那儿滚轮照样生效；
+   里面的内容再收窄到 780 居中。输入框仍钉在底部。 */
+body[data-view="inbox"] .inbox { flex: 1; min-height: 0; width: 100%; max-width: none; margin: 0; gap: 10px; }
+body[data-view="inbox"] .inbox-section,
+body[data-view="inbox"] .free-compose { width: 100%; max-width: 780px; margin-left: auto; margin-right: auto; }
 
 /* 待拍板常驻条：在滚动区外面，消息滚多远都看得见。 */
 .pending-bar {
