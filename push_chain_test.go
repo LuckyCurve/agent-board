@@ -124,8 +124,8 @@ func TestPushTestEndpoint(t *testing.T) {
 		t.Fatal("应该给用户一句人话")
 	}
 
-	// 要 token。
-	code = doWithToken(t, e.client, "POST", e.ts.URL+"/api/push/test", nil, "")
+	// 要 token（或网页会话）。
+	code = doWithToken(t, noRedirectClient(), "POST", e.ts.URL+"/api/push/test", nil, "")
 	if code != http.StatusUnauthorized {
 		t.Fatalf("匿名调用: %d, want 401", code)
 	}

@@ -58,7 +58,7 @@ func bodyString(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
-// 页面靠网页登录态；接口只认 Agent token，二者不能互相顶替。
+// 页面靠网页登录态；接口收 Bearer token 或会话 cookie，两种都合法，匿名一律 401。
 func TestAnonymousRequestsAreBlocked(t *testing.T) {
 	e := newTestServer(t, Config{Version: "test"}, testPassHash)
 	anon := noRedirectClient()
@@ -80,10 +80,10 @@ func TestAnonymousRequestsAreBlocked(t *testing.T) {
 		t.Fatalf("correct token: got %d want 200", got)
 	}
 
-	// 网页登录态不能拿来调接口。
+	// 网页登录态也能调接口（D-2 拍板改成 cookie）。
 	jar := loginWithJar(t, e.ts.URL, "test-pw")
-	if got := get(t, jar, e.ts.URL+"/api/tasks", nil).StatusCode; got != http.StatusUnauthorized {
-		t.Fatalf("cookie-only api: got %d want 401", got)
+	if got := get(t, jar, e.ts.URL+"/api/tasks", nil).StatusCode; got != http.StatusOK {
+		t.Fatalf("cookie api: got %d want 200", got)
 	}
 	if got := get(t, jar, e.ts.URL+"/", nil).StatusCode; got != http.StatusOK {
 		t.Fatalf("cookie page: got %d want 200", got)
@@ -114,39 +114,51 @@ func TestAnonymousRequestsAreBlocked(t *testing.T) {
 	}
 }
 
-// 写接口、长轮询、SSE 全部只认 token；浏览器 cookie 不算数。
+// 写接口、长轮询、SSE 全都认 token；浏览器 cookie 也认（D-2），但写操作要同源。
 func TestAgentTokenCoversWriteLongPollAndSSE(t *testing.T) {
 	e := newTestEnv(t)
 	login := loginWithJar(t, e.ts.URL, "test-pw") // 有网页登录态，但没有 token
+	anon := noRedirectClient()                    // 没 cookie 也没 token
 
 	type call struct {
 		method, path string
 		body         any
 	}
 	calls := []call{
-		{"POST", "/api/tasks", map[string]any{"title": "t"}},
 		{"GET", "/api/events?since=0&wait=0", nil},
 		{"GET", "/api/me", nil},
 	}
 	for _, c := range calls {
 		for _, tok := range []string{"", "wrong"} {
-			if got := doWithToken(t, login, c.method, e.ts.URL+c.path, c.body, tok); got != http.StatusUnauthorized {
+			if got := doWithToken(t, anon, c.method, e.ts.URL+c.path, c.body, tok); got != http.StatusUnauthorized {
 				t.Fatalf("%s %s token=%q: got %d want 401", c.method, c.path, tok, got)
 			}
 		}
-		if got := doWithToken(t, login, c.method, e.ts.URL+c.path, c.body, e.token); got >= 400 {
+		if got := doWithToken(t, anon, c.method, e.ts.URL+c.path, c.body, e.token); got >= 400 {
 			t.Fatalf("%s %s correct token: got %d", c.method, c.path, got)
 		}
 	}
 
+	// 只带 cookie 也能读；写要过同源校验（这里没有 Origin，交给 SameSite 兜底）。
+	if got := doWithToken(t, login, "GET", e.ts.URL+"/api/me", nil, ""); got != http.StatusOK {
+		t.Fatalf("cookie read: got %d want 200", got)
+	}
+	if got := doWithToken(t, login, "POST", e.ts.URL+"/api/tasks", map[string]any{"title": "t"}, ""); got >= 400 {
+		t.Fatalf("cookie write: got %d", got)
+	}
+
 	for _, tok := range []string{"", "wrong"} {
-		if got := doWithToken(t, login, "GET", e.ts.URL+"/api/stream", nil, tok); got != http.StatusUnauthorized {
+		if got := doWithToken(t, anon, "GET", e.ts.URL+"/api/stream", nil, tok); got != http.StatusUnauthorized {
 			t.Fatalf("sse token=%q: got %d want 401", tok, got)
 		}
 	}
 	// EventSource 不能带头，SSE 允许查询参数。
-	if got := doWithToken(t, login, "GET", e.ts.URL+"/api/stream?token="+e.token, nil, ""); got != http.StatusOK {
+	if got := doWithToken(t, anon, "GET", e.ts.URL+"/api/stream?token="+e.token, nil, ""); got != http.StatusOK {
 		t.Fatalf("sse query token: got %d want 200", got)
+	}
+	// 浏览器里 EventSource 自动带 cookie，不需要查询参数。
+	if got := doWithToken(t, login, "GET", e.ts.URL+"/api/stream", nil, ""); got != http.StatusOK {
+		t.Fatalf("sse cookie: got %d want 200", got)
 	}
 }
 
@@ -178,11 +190,12 @@ func doWithToken(t *testing.T, cl *http.Client, method, rawURL string, body any,
 	return resp.StatusCode
 }
 
-func TestIndexInjectsTokenButLoginPageDoesNot(t *testing.T) {
+// 页面里不再内嵌主令牌：网页走 cookie 就够了，令牌留在服务端和 CLI 手里。
+func TestPageCarriesNoAgentToken(t *testing.T) {
 	e := newTestEnv(t)
 	page := bodyString(t, get(t, e.client, e.ts.URL+"/", nil))
-	if !strings.Contains(page, `name="api-token"`) || !strings.Contains(page, e.token) {
-		t.Fatal("authenticated index should carry the agent token for the frontend")
+	if strings.Contains(page, e.token) || strings.Contains(page, "api-token") {
+		t.Fatal("页面不该再内嵌 Agent token，网页鉴权走会话 cookie")
 	}
 	login := bodyString(t, get(t, noRedirectClient(), e.ts.URL+"/login", nil))
 	if strings.Contains(login, e.token) || strings.Contains(login, "api-token") {
@@ -367,7 +380,7 @@ func TestLogoutRevokesSession(t *testing.T) {
 	}
 	if got := get(t, old, e.ts.URL+"/api/me", map[string]string{
 		"Cookie": sessionCookie + "=" + session}).StatusCode; got != http.StatusUnauthorized {
-		t.Fatalf("cookie-only api: got %d want 401", got)
+		t.Fatalf("replayed cookie api: got %d want 401", got)
 	}
 }
 

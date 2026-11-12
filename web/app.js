@@ -146,8 +146,9 @@ function toast(msg, kind = '') {
 
 /* ---------- api ---------- */
 
-// 鉴权走同源会话 cookie，页面里不再内嵌主令牌。
-// 旧页面若还带着 meta token，也照旧发出去——服务端两边都认，刷新前后都能用。
+// 网页一律走同源会话 cookie，页面里不再内嵌主令牌。
+// 过渡期：旧页面（部署前打开、还没刷新）仍带着 meta token，服务端照收；
+// 这里也照样发出去，免得旧页面在刷新前就断了。
 const LEGACY_TOKEN = (document.querySelector('meta[name="api-token"]') || {}).content || '';
 
 function authHeaders(extra) {

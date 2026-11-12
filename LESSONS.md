@@ -12,3 +12,5 @@
 | 推送在 Chrome/iOS 上收不到 | webpush-go v1.4.0 用的是旧版加密格式（盐塞在正文里），现代推送服务只认 RFC 8291 | 服务端自己按 RFC 8291 加密：盐进 `Encryption` 头、服务端公钥进 `Crypto-Key` 头、正文只留密文；`push_chain_test.go` 按浏览器的算法解密验原文 |
 | 推送在 iPhone 上收不到，Chrome 上却正常 | VAPID 的 `sub` 写死成 `mailto:...@localhost`，Apple 直接拒整个 JWT（403 BadJwtToken）；Chrome 不挑这个 | `sub` 改成 `VAPID_SUB` / `--vapid-sub` 可配，默认按站点域名推一个；`push_vapid_test.go` 锁住「只用 mailto:/https:、不含 localhost」 |
 | 推送失败时日志里一行都没有 | 非 404/410 的失败只做了计数，没写日志 | 失败一律 `log.Printf` 状态码 + 响应正文（长串打码、endpoint 只留主机名） |
+| 同时带令牌和网页会话时，绑定令牌能越权看全量 | 判断「是不是主会话」时先看 cookie 再看令牌，绑定令牌随手带上浏览器登录态就升级了 | `isMainCaller` 只要请求带了 Bearer 就按令牌判权限，cookie 只在没带令牌时才算；`security_test.go` 覆盖 |
+| 改成 cookie 鉴权后，一批「匿名 401」测试全变 200 | 那些测试的 client 自带登录 cookie，已经不算匿名 | 匿名断言一律用 `noRedirectClient()`，别再拿 `e.client` 当匿名 |

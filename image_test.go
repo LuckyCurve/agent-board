@@ -27,6 +27,10 @@ func tinyPNG(t *testing.T) []byte {
 }
 
 func uploadImage(t *testing.T, e *testEnv, data []byte, contentType, token string) (int, map[string]any) {
+	return uploadImageAs(t, e.client, e, data, contentType, token)
+}
+
+func uploadImageAs(t *testing.T, cl *http.Client, e *testEnv, data []byte, contentType, token string) (int, map[string]any) {
 	t.Helper()
 	req, err := http.NewRequest("POST", e.ts.URL+"/api/images", bytes.NewReader(data))
 	if err != nil {
@@ -36,7 +40,7 @@ func uploadImage(t *testing.T, e *testEnv, data []byte, contentType, token strin
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := e.client.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +54,8 @@ func uploadImage(t *testing.T, e *testEnv, data []byte, contentType, token strin
 func TestImageUploadRequiresTokenAndWhitelistsTypes(t *testing.T) {
 	e := newTestEnv(t)
 
-	code, _ := uploadImage(t, e, tinyPNG(t), "image/png", "")
+	// 匿名（无 cookie 无 token）不给上传。
+	code, _ := uploadImageAs(t, noRedirectClient(), e, tinyPNG(t), "image/png", "")
 	if code != http.StatusUnauthorized {
 		t.Fatalf("anonymous upload: %d, want 401", code)
 	}

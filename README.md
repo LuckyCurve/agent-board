@@ -41,7 +41,7 @@ go build -o agent-board.exe .
 
 换端口/数据目录：`serve --addr 127.0.0.1:9000 --data D:/board`。
 
-除登录页和静态资源外，页面要网页登录；所有 `/api/*` 另需 Agent token，网页登录态不能代替。登录失败每分钟最多 5 次。
+除登录页和静态资源外，页面要网页登录；`/api/*` 网页用会话 cookie、CLI 用 Agent token，两种都合法。写操作会校验 Origin，跨站提交一律拒绝。登录失败每分钟最多 5 次。
 
 手机访问要自己把监听地址改成局域网地址，并确认只在内网暴露。iOS Safari / Android Chrome 打开后可「添加到主屏幕」，按独立 App 使用，支持深色模式。
 

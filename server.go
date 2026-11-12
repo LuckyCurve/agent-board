@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io/fs"
 	"log"
 	"mime"
@@ -129,7 +128,7 @@ func (s *Server) Handler() http.Handler {
 
 	// 未登记的 API 也不给匿名探测的机会。
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		if !s.hasToken(r) {
+		if s.callerAuth(r) == authNone {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -207,13 +206,6 @@ func (s *Server) apiTokenValues() []string {
 	return out
 }
 
-func (s *Server) apiTokenValue() string {
-	if v := s.apiTokenValues(); len(v) > 0 {
-		return v[0]
-	}
-	return ""
-}
-
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Bearer ") {
@@ -250,6 +242,53 @@ func (s *Server) hasToken(r *http.Request) bool {
 	return err == nil && ok
 }
 
+// callerAuth 记下这次请求是靠什么进来的。
+// 网页用会话 cookie，CLI / Agent 用 Bearer token，两种都合法；
+// 区别只在写操作：cookie 会被浏览器自动带上，所以要多一道 Origin 校验。
+type callerAuth int
+
+const (
+	authNone callerAuth = iota
+	authToken
+	authCookie
+)
+
+func (s *Server) callerAuth(r *http.Request) callerAuth {
+	if s.hasToken(r) {
+		return authToken
+	}
+	if s.hasSession(r) {
+		return authCookie
+	}
+	return authNone
+}
+
+func isWriteMethod(m string) bool {
+	switch m {
+	case http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// sameOriginRequest 是 CSRF 的第二道闸。浏览器的跨站请求一定会带 Origin，
+// 所以只要带了就必须和本站同源；不带 Origin 的（同源表单、CLI）交给
+// SameSite=Lax 兜底——跨站带 cookie 的 POST 到不了这里。
+func sameOriginRequest(r *http.Request) bool {
+	src := r.Header.Get("Origin")
+	if src == "" {
+		src = r.Header.Get("Referer")
+	}
+	if src == "" {
+		return true
+	}
+	u, err := url.Parse(src)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
 // identityHeader 是请求里的 Agent 身份，和令牌解耦：
 // 同一把令牌可以代表不同 Agent，服务端只按这个身份收窄数据。
 // 留空或写 main 表示主会话，看全量。
@@ -258,8 +297,6 @@ const identityHeader = "X-Agent-Identity"
 // mainIdentity 是主会话身份；它不是某个 Agent 的名字，而是「不设限」。
 const mainIdentity = "main"
 
-// agentScope 决定这个请求能碰哪些 Agent 的卡。
-// 身份优先取请求头（同一令牌可代表不同 Agent），没带才退回令牌绑定的 Agent。
 // agentScope 决定这个请求能碰哪些 Agent 的卡。
 // 身份头只对主会话本人有效（网页登录态或主令牌）——绑定了 Agent 的令牌
 // 换个头就能看别人的卡，那等于没有隔离。
@@ -284,10 +321,15 @@ func (s *Server) agentScope(r *http.Request) string {
 	return agent
 }
 
-// isMainCaller：持有主令牌。绑定令牌不算——它换个身份头就能看别人的卡，
-// 那等于没有隔离。
+// isMainCaller：网页登录态，或持有主令牌。绑定令牌不算——它换个身份头
+// 就能看别人的卡，那等于没有隔离。
+// 同时带了令牌和 cookie 时以令牌为准：否则绑定令牌只要顺手带上网页会话
+// 就能升级成主会话，隔离形同虚设。
 func (s *Server) isMainCaller(r *http.Request) bool {
-	return s.validToken(bearerToken(r))
+	if tok := bearerToken(r); tok != "" {
+		return s.validToken(tok)
+	}
+	return s.hasSession(r)
 }
 
 // ownsTask 判断请求能不能动这张卡。
@@ -304,10 +346,18 @@ func (s *Server) ownsTask(w http.ResponseWriter, r *http.Request, taskID string)
 	return true
 }
 
+// authed 是 /api/* 的统一闸门：网页会话 cookie 或 Agent token，二选一。
+// 写操作若靠 cookie 进来，还要过同源校验——cookie 是浏览器自动带的，
+// 光靠它挡不住跨站提交。
 func (s *Server) authed(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.hasToken(r) {
+		auth := s.callerAuth(r)
+		if auth == authNone {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if auth == authCookie && isWriteMethod(r.Method) && !sameOriginRequest(r) {
+			writeErr(w, http.StatusForbidden, "跨站请求已拒绝")
 			return
 		}
 		fn(w, r)
@@ -317,6 +367,10 @@ func (s *Server) authed(fn http.HandlerFunc) http.HandlerFunc {
 // EventSource 不能带自定义头，只对 SSE 放宽到查询参数。
 func (s *Server) authedStream(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.hasSession(r) {
+			fn(w, r)
+			return
+		}
 		token := bearerToken(r)
 		if token == "" {
 			token = r.URL.Query().Get("token")
@@ -1280,15 +1334,6 @@ func (s *Server) servePage(w http.ResponseWriter, name string) {
 	if err != nil {
 		http.Error(w, "404 page not found", http.StatusNotFound)
 		return
-	}
-	// /api/* 只认 Bearer token（网页登录态不能代替），所以页面得带上令牌。
-	// 只有已登录的会话才拿得到 index.html，未登录会被重定向到 /login。
-	if name == "index.html" {
-		tag := ""
-		if tok := s.apiTokenValue(); tok != "" {
-			tag = `<meta name="api-token" content="` + html.EscapeString(tok) + `">`
-		}
-		b = []byte(strings.Replace(string(b), "<!-- api-token -->", tag, 1))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

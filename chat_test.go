@@ -54,7 +54,7 @@ func TestChatRejectsUnknownTaskAndRequiresToken(t *testing.T) {
 	if code != http.StatusNotFound {
 		t.Fatalf("unknown task: %d, want 404", code)
 	}
-	code = doWithToken(t, e.client, "GET", e.ts.URL+"/api/chat", nil, "")
+	code = doWithToken(t, noRedirectClient(), "GET", e.ts.URL+"/api/chat", nil, "")
 	if code != http.StatusUnauthorized {
 		t.Fatalf("anonymous chat: %d, want 401", code)
 	}

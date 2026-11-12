@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -176,5 +177,75 @@ func TestTokenRotationKeepsGrace(t *testing.T) {
 	}
 	if !s.validToken("new-token") {
 		t.Fatal("当前令牌不该失效")
+	}
+}
+
+// D-2：网页走 cookie。cookie 会被浏览器自动带上，所以写操作必须过同源校验；
+// 跨站页面借用户的登录态提交，一律 403。
+func TestCookieWriteRequiresSameOrigin(t *testing.T) {
+	e := newTestEnv(t)
+	body := func() io.Reader { return strings.NewReader(`{"title":"csrf 测试"}`) }
+
+	do := func(origin string) int {
+		req, _ := http.NewRequest("POST", e.ts.URL+"/api/tasks", body())
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := e.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := do("https://evil.example"); got != http.StatusForbidden {
+		t.Fatalf("跨站写操作: got %d want 403", got)
+	}
+	if got := do(e.ts.URL); got >= 400 {
+		t.Fatalf("同源写操作: got %d", got)
+	}
+	// 不带 Origin 的同源表单/旧客户端照旧放行，跨站带 cookie 的 POST 由 SameSite=Lax 挡住。
+	if got := do(""); got >= 400 {
+		t.Fatalf("无 Origin 写操作: got %d", got)
+	}
+
+	// 读操作不受 Origin 限制：跨站读不到 cookie，同源页面读本来就该放行。
+	req, _ := http.NewRequest("GET", e.ts.URL+"/api/tasks", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("读操作不该被 Origin 拦: %d", resp.StatusCode)
+	}
+}
+
+// 过渡期：部署前已经打开、还没刷新的旧页面仍带着 meta token。
+// 令牌继续有效，但页面本身不再注入它——新开的页面只靠 cookie。
+func TestLegacyTokenStillWorksForApi(t *testing.T) {
+	e := newTestServer(t, Config{Version: "test"}, testPassHash)
+	anon := noRedirectClient()
+	if got := get(t, anon, e.ts.URL+"/api/tasks", map[string]string{
+		"Authorization": "Bearer " + e.token}).StatusCode; got != http.StatusOK {
+		t.Fatalf("旧页面的令牌该继续可用: got %d", got)
+	}
+}
+
+// cookie 鉴权下，网页会话自己就是主会话，不该被当成某个 Agent 收窄。
+func TestCookieSessionSeesWholeBoard(t *testing.T) {
+	e := newTestEnv(t)
+	if code, out, _ := e.req(t, "POST", "/api/tasks", map[string]any{"title": "别人的卡", "agent": "a9"}); code >= 400 {
+		t.Fatalf("建卡: %d %v", code, out)
+	}
+	code, out, _ := e.req(t, "GET", "/api/tasks", nil)
+	if code != http.StatusOK {
+		t.Fatalf("列卡: %d", code)
+	}
+	if n := len(out["tasks"].([]any)); n == 0 {
+		t.Fatal("网页会话该看到全部卡片，而不是被收窄成空")
 	}
 }

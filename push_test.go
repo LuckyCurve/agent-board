@@ -9,7 +9,7 @@ import (
 func TestPushSubscriptionRequiresTokenAndToggles(t *testing.T) {
 	e := newTestEnv(t)
 
-	code := doWithToken(t, e.client, "GET", e.ts.URL+"/api/push/status", nil, "")
+	code := doWithToken(t, noRedirectClient(), "GET", e.ts.URL+"/api/push/status", nil, "")
 	if code != http.StatusUnauthorized {
 		t.Fatalf("anonymous push status: %d, want 401", code)
 	}

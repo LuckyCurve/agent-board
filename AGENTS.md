@@ -108,5 +108,5 @@ CI 跑 `gofmt -l .`、`go vet`、`go test -race`、`go build`。
 
 - 先写测试再改实现；新功能要有 Go 测试，界面改动要有 `ui_test.go` 里的断言。
 - 口令只存加盐慢哈希，token 只进 `~/.agent-board/token`（0600）；**口令、token、数据库都不许进仓库**。
-- 会话 cookie 必须 HttpOnly + SameSite；`/api/*` 走 Bearer token，网页登录态不能代替。
+- 会话 cookie 必须 HttpOnly + SameSite；`/api/*` 网页走 cookie、CLI 走 Bearer，两者都合法。写操作必须校验 Origin（cookie 会被浏览器自动带上，光靠它挡不住跨站提交）。
 - 改完先本地验（命令行、无头浏览器），再按上面三步交付。
