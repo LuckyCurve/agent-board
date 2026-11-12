@@ -304,4 +304,3 @@ func TestGrainLayerScrollsWithContent(t *testing.T) {
 		t.Fatalf("body 的三层背景应为「渐变 fixed、噪点 scroll」\n%s", rule)
 	}
 }
-
