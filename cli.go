@@ -540,6 +540,55 @@ func cmdDecisions(args []string) {
 	}
 }
 
+// cmdHost 把「这台机器上是哪个主 Agent」登记到看板。
+// 机器名和用户名自动取；IP 由服务端按请求来源记，客户端说了不算。
+func cmdHost(args []string) {
+	fs := flag.NewFlagSet("host", flag.ExitOnError)
+	agent := fs.String("agent", "", "这台机器的主 Agent（默认取 --as / BOARD_AGENT）")
+	fs.Parse(args)
+	c := mustClient()
+	name := strings.TrimSpace(*agent)
+	if name == "" {
+		name = c.identity
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "用 --agent 或 --as 指定这台机器的主 Agent")
+		os.Exit(2)
+	}
+	host, err := registerHost(c, name)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Printf("%s  %s@%s  %s\n", host.Agent, host.Username, host.Hostname, host.IP)
+}
+
+// registerHost 上报本机信息，返回服务端记下的那份（IP 以服务端为准）。
+func registerHost(c *client, agent string) (Host, error) {
+	hostname, _ := os.Hostname()
+	body := map[string]string{
+		"agent":    agent,
+		"hostname": hostname,
+		"username": osUsername(),
+	}
+	var resp struct {
+		Host Host `json:"host"`
+	}
+	if err := c.do("POST", "/api/hosts", body, &resp); err != nil {
+		return Host{}, err
+	}
+	return resp.Host, nil
+}
+
+// osUsername 取当前用户名；Windows 上 USERNAME，类 Unix 上是 USER。
+func osUsername() string {
+	for _, k := range []string{"USER", "USERNAME", "LOGNAME"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func cmdWatch(args []string) {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	consumer := fs.String("consumer", "main", "consumer name")
@@ -567,6 +616,18 @@ func cmdWatch(args []string) {
 		since = cur.AckedSeq
 	}
 	fmt.Fprintf(os.Stderr, "watching from seq=%d as %s\n", since, *consumer)
+
+	// 主会话常驻监听时顺手登记本机：切换器里那台机器的主 Agent 就这么来的。
+	// 只登记 consumer=main 的那个——子 Agent 不登记，所以不进切换器。
+	if *consumer == "main" {
+		if name := c.identity; name != "" {
+			if h, err := registerHost(c, name); err != nil {
+				fmt.Fprintf(os.Stderr, "登记主机失败（不影响监听）: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "host: %s  %s@%s  %s\n", h.Agent, h.Username, h.Hostname, h.IP)
+			}
+		}
+	}
 
 	for {
 		var resp struct {

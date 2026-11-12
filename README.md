@@ -118,7 +118,17 @@ agent-board task tag T-1 remove 登录
 agent-board task transfer T-1 --to "看板开发"   # 转交，事件里留痕
 ```
 
-项目也算一个筛选维度（页面里显示成「项目 · 名字」）；Agent 归右上角的切换器管，两者一起生效。
+项目也算一个筛选维度（页面里显示成「项目 · 名字」）；Agent 归筛选行的切换器管，两者一起生效。
+
+## 切换器只列每台机器的主 Agent
+
+一台机器一个主 Agent，子 Agent 不进切换器。主会话常驻 `watch` 时顺手登记本机：
+
+```bash
+agent-board host --agent "看板开发"      # 也可以直接：BOARD_AGENT=看板开发 agent-board watch
+```
+
+登记的是机器名、用户名和 IP（IP 由服务端按请求来源记，客户端改不了）。切换器里显示成 `看板开发 · DESKTOP-1`，选中后旁边补 `用户名 · IP`。同一台机器换主 Agent，新的顶掉旧的；没人登记过时切换器退回列出全部 Agent。
 
 ## 一个 Agent 一把令牌
 

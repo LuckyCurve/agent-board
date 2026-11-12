@@ -220,6 +220,114 @@ func TestAgentsList(t *testing.T) {
 	}
 }
 
+// main 是「不设限」的身份，不是 Agent，不该出现在切换器里。
+func TestAgentsListExcludesMainIdentity(t *testing.T) {
+	e := newTestEnv(t)
+	e.createTask(t, "看板开发", "doing")
+	code, body, _ := e.req(t, "POST", "/api/tasks", map[string]any{
+		"title": "主会话建的卡", "agent": "main", "column": "todo"})
+	if code != http.StatusCreated {
+		t.Fatalf("建卡: %d %v", code, body)
+	}
+	code, body, _ = e.req(t, "GET", "/api/agents", nil)
+	if code != http.StatusOK {
+		t.Fatalf("取 Agent 列表: %d %v", code, body)
+	}
+	for _, a := range body["agents"].([]any) {
+		if strings.EqualFold(a.(string), "main") {
+			t.Fatalf("main 不是 Agent，不该出现在列表里: %v", body["agents"])
+		}
+	}
+}
+
+// 每台机器的主 Agent 登记一次，切换器据此显示机器名、用户名和 IP。
+// IP 只认请求来源：客户端写什么都会被覆盖。
+func TestHostRegisterRecordsMachineAndSourceIP(t *testing.T) {
+	e := newTestEnv(t)
+	code, body, _ := e.req(t, "POST", "/api/hosts", map[string]any{
+		"agent": "看板开发", "hostname": "DESKTOP-1", "username": "lucky", "ip": "1.2.3.4"})
+	if code != http.StatusOK {
+		t.Fatalf("登记主机: %d %v", code, body)
+	}
+	host := body["host"].(map[string]any)
+	if host["ip"] != "127.0.0.1" {
+		t.Fatalf("IP 该按请求来源记，实际 %v", host["ip"])
+	}
+	if host["hostname"] != "DESKTOP-1" || host["username"] != "lucky" {
+		t.Fatalf("机器名/用户名没记上: %v", host)
+	}
+
+	code, body, _ = e.req(t, "GET", "/api/agents", nil)
+	if code != http.StatusOK {
+		t.Fatalf("取 Agent 列表: %d %v", code, body)
+	}
+	hosts := body["hosts"].([]any)
+	if len(hosts) != 1 {
+		t.Fatalf("应该有一台主机: %v", hosts)
+	}
+	if got := hosts[0].(map[string]any)["agent"]; got != "看板开发" {
+		t.Fatalf("主机归谁: %v", got)
+	}
+}
+
+// 一台机器只留一个主 Agent：同机器同用户再登记别的名字，旧名字让位。
+func TestHostKeepsOneMainAgentPerMachine(t *testing.T) {
+	e := newTestEnv(t)
+	for _, a := range []string{"旧主 Agent", "新主 Agent"} {
+		code, body, _ := e.req(t, "POST", "/api/hosts", map[string]any{
+			"agent": a, "hostname": "DESKTOP-1", "username": "lucky"})
+		if code != http.StatusOK {
+			t.Fatalf("登记 %s: %d %v", a, code, body)
+		}
+	}
+	code, body, _ := e.req(t, "GET", "/api/agents", nil)
+	if code != http.StatusOK {
+		t.Fatalf("取 Agent 列表: %d %v", code, body)
+	}
+	hosts := body["hosts"].([]any)
+	if len(hosts) != 1 {
+		t.Fatalf("同一台机器只该留一个主 Agent: %v", hosts)
+	}
+	if got := hosts[0].(map[string]any)["agent"]; got != "新主 Agent" {
+		t.Fatalf("后登记的主 Agent 该顶掉旧的，实际 %v", got)
+	}
+}
+
+// 绑定令牌只能登记自己，不能替别的 Agent 报名——否则切换器能被塞假主机。
+func TestHostRegisterCannotSpoofOtherAgent(t *testing.T) {
+	e := newTestEnv(t)
+	tok := "scoped-a2"
+	if err := e.store.SaveAgentToken(sessionHash(tok), "a2"); err != nil {
+		t.Fatal(err)
+	}
+	code, body, _ := reqWithIdentity(t, e, "POST", "/api/hosts", map[string]any{
+		"agent": "a1", "hostname": "H", "username": "u"}, tok, "a1")
+	if code != http.StatusOK {
+		t.Fatalf("登记主机: %d %v", code, body)
+	}
+	if got := body["host"].(map[string]any)["agent"]; got != "a2" {
+		t.Fatalf("绑定令牌只能登记自己，实际记成了 %v", got)
+	}
+}
+
+// 主令牌可以替别的 Agent 登记（主会话替各机器报名）。
+func TestHostRegisterMainTokenCanNameAgent(t *testing.T) {
+	e := newTestEnv(t)
+	code, body, _ := reqWithIdentity(t, e, "POST", "/api/hosts", map[string]any{
+		"agent": "wealth-dev", "hostname": "LAPTOP", "username": "lucky"}, e.token, "")
+	if code != http.StatusOK {
+		t.Fatalf("登记主机: %d %v", code, body)
+	}
+	if got := body["host"].(map[string]any)["agent"]; got != "wealth-dev" {
+		t.Fatalf("主令牌登记的主 Agent: %v", got)
+	}
+	// main 不是 Agent，拒绝。
+	code, body, _ = e.req(t, "POST", "/api/hosts", map[string]any{"agent": "main"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("main 不该能登记成主机: %d %v", code, body)
+	}
+}
+
 // 身份隔离：同一把令牌可以代表不同 Agent，服务端按身份收窄，不靠令牌。
 func TestIdentityIsolationByHeader(t *testing.T) {
 	e := newTestEnv(t)

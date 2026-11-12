@@ -216,6 +216,7 @@ func (s *Store) AgentForToken(tokenHash string) (string, bool, error) {
 }
 
 // ListAgents 是所有出现过的 Agent：卡片归属 + 令牌绑定。
+// main 是「不设限」的身份，不是 Agent，别混进列表。
 func (s *Store) ListAgents() ([]string, error) {
 	rows, err := s.db.Query(`
 		SELECT agent FROM tasks WHERE COALESCE(agent,'')<>''
@@ -230,6 +231,9 @@ func (s *Store) ListAgents() ([]string, error) {
 		var a string
 		if err := rows.Scan(&a); err != nil {
 			return nil, err
+		}
+		if strings.EqualFold(a, mainIdentity) {
+			continue
 		}
 		out = append(out, a)
 	}
@@ -251,6 +255,58 @@ func (s *Store) TaskOwner(taskID string) (string, error) {
 		return "", err
 	}
 	return agent, nil
+}
+
+// Host 是一台机器的注册信息。
+// 一台机器一个主 Agent：机器名 + 用户名相同的再注册，会顶掉原来那个名字。
+// 子 Agent 不注册，所以切换器里只剩主 Agent。
+type Host struct {
+	Agent     string `json:"agent"`
+	IP        string `json:"ip"`
+	Hostname  string `json:"hostname"`
+	Username  string `json:"username"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func (s *Store) SaveHost(h Host) error {
+	h.Agent = strings.TrimSpace(h.Agent)
+	if h.Agent == "" {
+		return errors.New("agent required")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if h.Hostname != "" {
+		if _, err := tx.Exec(`DELETE FROM hosts WHERE hostname=? AND COALESCE(username,'')=? AND agent<>?`,
+			h.Hostname, h.Username, h.Agent); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO hosts(agent,ip,hostname,username,updated_at) VALUES(?,?,?,?,?)`,
+		h.Agent, nullify(h.IP), nullify(h.Hostname), nullify(h.Username), nowISO()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ListHosts 是所有注册过的主 Agent，按名字排序。
+func (s *Store) ListHosts() ([]Host, error) {
+	rows, err := s.db.Query(`SELECT agent,COALESCE(ip,''),COALESCE(hostname,''),COALESCE(username,''),updated_at FROM hosts ORDER BY agent`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Host{}
+	for rows.Next() {
+		var h Host
+		if err := rows.Scan(&h.Agent, &h.IP, &h.Hostname, &h.Username, &h.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
 
 // ErrNotOwner：这张卡不归这个 Agent 管。

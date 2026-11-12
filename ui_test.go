@@ -170,6 +170,25 @@ func TestAgentSwitchLivesInFilterBar(t *testing.T) {
 	}
 }
 
+// 切换器只列每台机器的主 Agent，并显示那台机器的信息。
+func TestAgentSwitchShowsHostsOnly(t *testing.T) {
+	e := newTestEnv(t)
+	body := getPageBody(t, e, "/")
+	if !strings.Contains(body, `id="agentHost"`) {
+		t.Fatal("切换器旁要有主机信息的位置")
+	}
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{"switchAgents()", "state.hosts[a]", "renderAgentHost()", "hostLabel(a)"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js 缺 %s（切换器要按主机收窄并显示机器信息）", want)
+		}
+	}
+	css := getPageBody(t, e, "/app.css")
+	if !strings.Contains(css, ".agent-host") {
+		t.Fatal("app.css 缺主机信息样式")
+	}
+}
+
 // 消息正文、卡片事件、卡片摘要里的链接都要渲染成可点锚点。
 func TestBodyLinksAreAnchors(t *testing.T) {
 	e := newTestEnv(t)

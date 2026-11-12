@@ -194,6 +194,13 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
   agent TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hosts (
+  agent TEXT PRIMARY KEY,
+  ip TEXT,
+  hostname TEXT,
+  username TEXT,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS login_failures (
   ip TEXT NOT NULL,
   at INTEGER NOT NULL

@@ -14,3 +14,4 @@
 | 推送失败时日志里一行都没有 | 非 404/410 的失败只做了计数，没写日志 | 失败一律 `log.Printf` 状态码 + 响应正文（长串打码、endpoint 只留主机名） |
 | 同时带令牌和网页会话时，绑定令牌能越权看全量 | 判断「是不是主会话」时先看 cookie 再看令牌，绑定令牌随手带上浏览器登录态就升级了 | `isMainCaller` 只要请求带了 Bearer 就按令牌判权限，cookie 只在没带令牌时才算；`security_test.go` 覆盖 |
 | 改成 cookie 鉴权后，一批「匿名 401」测试全变 200 | 那些测试的 client 自带登录 cookie，已经不算匿名 | 匿名断言一律用 `noRedirectClient()`，别再拿 `e.client` 当匿名 |
+| 切换器里混着 `main` 和一堆子 Agent | `ListAgents` 直接拿任务归属去重，`main` 是身份不是 Agent，子 Agent 又和主 Agent 同名同姓分不出来 | 新增 `hosts` 表只收登记过的主 Agent，切换器优先按它列；`main` 在 `ListAgents` 里剔掉 |

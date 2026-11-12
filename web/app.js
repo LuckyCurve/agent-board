@@ -19,6 +19,7 @@ const state = {
   chat: [],
   activity: [],
   agents: [],
+  hosts: {},            // agent -> {ip, hostname, username}，切换器下面那行主机信息
   view: 'inbox',
   loaded: false,
   filterAgent: '',      // 空 = 全部 Agent
@@ -354,6 +355,7 @@ function renderFilterBar() {
   if (clear) clear.hidden = !filterActive();
   const sel = $('#agentSwitch');
   if (sel && sel.value !== state.filterAgent) sel.value = state.filterAgent;
+  renderAgentHost();
   // 手机上筛选收起时，用按钮上的角标告诉用户「筛着呢」。
   const badge = $('#filterBadge');
   if (badge) {
@@ -391,21 +393,56 @@ async function refreshAgents() {
   try {
     const data = await api('/api/agents');
     state.agents = data.agents || [];
+    state.hosts = {};
+    (data.hosts || []).forEach(h => { state.hosts[h.agent] = h; });
   } catch (_) {
     state.agents = [];
+    state.hosts = {};
   }
   const sel = $('#agentSwitch');
   if (sel) {
     const cur = state.filterAgent;
+    const list = switchAgents();
     sel.innerHTML = '<option value="">全部 Agent</option>' +
-      state.agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
-    sel.value = state.agents.indexOf(cur) >= 0 ? cur : '';
+      list.map(a => `<option value="${esc(a)}">${esc(hostLabel(a))}</option>`).join('');
+    sel.value = list.indexOf(cur) >= 0 ? cur : '';
     if (sel.value !== state.filterAgent) {
       state.filterAgent = sel.value;
       saveFilters();
     }
   }
+  renderAgentHost();
   renderCalAgents();
+}
+
+// 切换器只列「每台机器的主 Agent」——注册过主机的才算。
+// 一台机器一个主 Agent，子 Agent 不注册，自然进不来。
+// 还没人注册过时退回全部 Agent，免得老看板升级后切换器空掉。
+function switchAgents() {
+  const hosted = state.agents.filter(a => state.hosts[a]);
+  return hosted.length ? hosted : state.agents;
+}
+
+// 一台机器一个主 Agent：下拉里写「Agent · 机器名」，选中的那个旁边补
+// 「用户名 · IP」，三样信息都在，互不重复。
+function hostLabel(a) {
+  const h = state.hosts[a];
+  return h && h.hostname ? `${a} · ${h.hostname}` : a;
+}
+
+function renderAgentHost() {
+  const el = $('#agentHost');
+  if (!el) return;
+  const h = state.filterAgent ? state.hosts[state.filterAgent] : null;
+  if (!h || (!h.ip && !h.hostname)) {
+    el.hidden = true;
+    el.textContent = '';
+    el.removeAttribute('title');
+    return;
+  }
+  el.textContent = [h.username, h.ip].filter(Boolean).join(' · ');
+  el.title = `${h.hostname || '未知机器'} · ${h.username || '未知用户'} · ${h.ip || '未知 IP'}`;
+  el.hidden = false;
 }
 
 // Agent 切换器就在筛选行，跟标签筛选放一起；窄屏也不用挪。

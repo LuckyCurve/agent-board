@@ -315,6 +315,7 @@ func usage() {
   agent-board ask --task T-1 --question "..." [--options "同意,重做,稍后"]
   agent-board decisions [--status pending]
   agent-board watch [--consumer main] [--since N]
+  agent-board host --agent "名字"    # 登记这台机器的主 Agent（机器名/用户名/IP）
   agent-board dispatch --seq N --to "Agent" [--note "..."]
   agent-board ack --seq N [--consumer main]
   agent-board take --seq N [--agent X]
@@ -361,6 +362,8 @@ func main() {
 		cmdDecisions(os.Args[2:])
 	case "watch":
 		cmdWatch(os.Args[2:])
+	case "host":
+		cmdHost(os.Args[2:])
 	case "dispatch":
 		cmdDispatch(os.Args[2:])
 	case "ack":

@@ -266,7 +266,7 @@ svg { display: block; }
   appearance: none;
   -webkit-appearance: none;
   height: 32px;
-  max-width: 132px;
+  max-width: 210px;
   padding: 0 24px 0 10px;
   border-radius: 8px;
   border: 1px solid var(--border-soft);
@@ -282,6 +282,17 @@ svg { display: block; }
 }
 .agent-select:hover { border-color: var(--border); }
 .agent-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 选中某个 Agent 时，旁边补一行它在哪台机器上：机器名@用户 · IP。 */
+.agent-host {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
 
 /* ---------- 筛选行 ---------- */
 
@@ -1954,7 +1965,8 @@ dialog.sheet:not([open]) { display: none; }
   .brand-name { display: none; }
 
   .filterbar { padding: 6px 14px; gap: 8px; display: block; }
-  .filterbar .agent-select { height: 30px; max-width: 140px; font-size: 12px; }
+  .filterbar .agent-select { height: 30px; max-width: 180px; font-size: 12px; }
+  .filterbar .agent-host { max-width: 110px; }
   .tagchip { height: 26px; padding: 0 10px; font-size: 12px; }
 
   /* 手机上筛选收成一个按钮，点开才占地方；摊开会把一行挤爆。 */

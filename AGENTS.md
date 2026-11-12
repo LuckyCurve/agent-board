@@ -68,6 +68,7 @@ agent-board done T-1 --text "结论"                                # 完成
 agent-board message --text "..." --from main                      # 主会话自己回话
 agent-board task tag T-1 add 界面,推送                            # 加标签（remove 去掉）
 agent-board task transfer T-1 --to "另一个 Agent"                 # 转交，事件里留痕
+agent-board host --agent "名字"                                  # 登记本机（主会话 watch 时自动做）
 ```
 
 - 结论写 `conclusion`，不要只写 `note`。

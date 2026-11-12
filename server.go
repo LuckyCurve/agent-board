@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.authed(s.handleTaskEvents))
 	mux.HandleFunc("POST /api/tasks/{id}/tags", s.authed(s.handleTaskTags))
 	mux.HandleFunc("GET /api/agents", s.authed(s.handleAgents))
+	mux.HandleFunc("POST /api/hosts", s.authed(s.handleHostRegister))
 
 	mux.HandleFunc("GET /api/decisions", s.authed(s.handleDecisions))
 	mux.HandleFunc("POST /api/decisions", s.authed(s.handleDecisionCreate))
@@ -601,6 +602,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgents 列出所有 Agent，页面右上角的切换器用。
+// hosts 是各自主 Agent 所在的机器；没有注册过的 Agent 不出现在里面。
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.store.ListAgents()
 	if err != nil {
@@ -610,7 +612,47 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+	hosts, err := s.store.ListHosts()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents, "hosts": hosts})
+}
+
+// handleHostRegister 记录「这台机器上是哪个主 Agent」。
+// IP 只认请求来源，不收请求体里的值——那是客户端能随便写的。
+// 绑定令牌只能登记自己，换名字要主会话来做。
+func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Agent    string `json:"agent"`
+		Hostname string `json:"hostname"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	agent := strings.TrimSpace(req.Agent)
+	if scope := s.agentScope(r); scope != "" {
+		agent = scope
+	}
+	if agent == "" || strings.EqualFold(agent, mainIdentity) {
+		writeErr(w, http.StatusBadRequest, "agent required")
+		return
+	}
+	h := Host{
+		Agent:    agent,
+		IP:       clientIP(r),
+		Hostname: strings.TrimSpace(req.Hostname),
+		Username: strings.TrimSpace(req.Username),
+	}
+	if err := s.store.SaveHost(h); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.UpdatedAt = nowISO()
+	writeJSON(w, http.StatusOK, map[string]any{"host": h})
 }
 
 // handleTaskTags 给卡片加/删标签。
