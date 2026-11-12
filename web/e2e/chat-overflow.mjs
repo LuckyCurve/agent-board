@@ -107,21 +107,29 @@ await api('POST', '/api/message', {
 }, TOKEN);
 
 // 3) 起 Chrome，登录，375 真视口量
+// 调试端口自己挑一个固定值再轮询：用 0 让 Chrome 自己选的话，得靠解析 stderr
+// 那行 "DevTools listening on"，CI 上偶发读不到就直接超时了。
+const DEBUG_PORT = 19000 + Math.floor(Math.random() * 900);
 chrome = spawn(chromePath(), [
-  '--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + path.join(DATA, 'chrome'),
+  '--headless=new', '--remote-debugging-port=' + DEBUG_PORT, '--user-data-dir=' + path.join(DATA, 'chrome'),
   '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--hide-scrollbars',
   'about:blank',
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
-const debugPort = await new Promise((res, rej) => {
-  let buf = '';
-  const timer = setTimeout(() => rej(new Error('Chrome 没报调试端口')), 15000);
-  chrome.stderr.on('data', d => {
-    buf += d.toString();
-    const m = buf.match(/DevTools listening on ws:\/\/[^:]+:(\d+)\//);
-    if (m) { clearTimeout(timer); res(Number(m[1])); }
-  });
-  chrome.on('exit', () => { clearTimeout(timer); rej(new Error('Chrome 退出了: ' + buf.slice(0, 300))); });
-});
+let chromeErr = '';
+chrome.stderr.on('data', d => { chromeErr += d.toString(); });
+let chromeExited = false;
+chrome.on('exit', () => { chromeExited = true; });
+const debugPort = await (async () => {
+  for (let i = 0; i < 200; i++) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`);
+      if (r.ok) return DEBUG_PORT;
+    } catch (_) {}
+    if (chromeExited) throw new Error('Chrome 退出了: ' + chromeErr.slice(0, 300));
+    await sleep(100);
+  }
+  throw new Error('Chrome 调试端口没起来: ' + chromeErr.slice(0, 300));
+})();
 
 const b = await connectCDP(debugPort);
 await b.send('Page.enable');
