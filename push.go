@@ -33,6 +33,7 @@ type pushMessage struct {
 }
 
 // pushMessageFor 决定一件事值不值得打扰：只有要人动手或要人知道的才推。
+// 进展也推——用户要的是「它在动」，不是等到最后才知道卡住了。
 func pushMessageFor(kind, taskID, text string) (pushMessage, bool) {
 	var label string
 	switch kind {
@@ -44,6 +45,8 @@ func pushMessageFor(kind, taskID, text string) (pushMessage, bool) {
 		label = "阻塞"
 	case "failed":
 		label = "失败"
+	case "progress":
+		label = "进展"
 	default:
 		return pushMessage{}, false
 	}
@@ -125,7 +128,31 @@ func (s *Server) notify(kind, taskID, text string) {
 	if !ok {
 		return
 	}
+	// 进展本来就会连着来，同一张卡隔一会儿再说一次就够了。
+	if kind == "progress" && !s.allowProgressPush(taskID) {
+		return
+	}
 	go s.sendPush(msg)
+}
+
+// 同一张卡的进展，5 分钟内只推第一条。结论、阻塞、失败照旧条条推。
+const progressPushEvery = 5 * time.Minute
+
+func (s *Server) allowProgressPush(taskID string) bool {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	now := time.Now()
+	if last, ok := s.lastProgress[taskID]; ok && now.Sub(last) < progressPushEvery {
+		return false
+	}
+	// 顺手清掉过期的，别让这个表跟着卡片数一直长。
+	for k, t := range s.lastProgress {
+		if now.Sub(t) > progressPushEvery {
+			delete(s.lastProgress, k)
+		}
+	}
+	s.lastProgress[taskID] = now
+	return true
 }
 
 // sendPush 发给所有订阅端，返回成功台数、失败台数和第一条失败原因。

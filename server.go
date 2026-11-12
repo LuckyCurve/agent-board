@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,6 +55,9 @@ type Server struct {
 	cfg       Config
 	loginRate *loginLimiter
 	imagesDir string
+	pushMu    sync.Mutex
+	// 每张卡上一次推「进展」的时间，用来限流；见 allowProgressPush。
+	lastProgress map[string]time.Time
 }
 
 func NewServer(store *Store, cfg Config) *Server {
@@ -62,10 +66,11 @@ func NewServer(store *Store, cfg Config) *Server {
 		dir = filepath.Join(os.TempDir(), "agent-board-images")
 	}
 	return &Server{
-		store:     store,
-		cfg:       cfg,
-		loginRate: newLoginLimiter(cfg.LoginLimit, cfg.LoginWindow),
-		imagesDir: dir,
+		store:        store,
+		cfg:          cfg,
+		loginRate:    newLoginLimiter(cfg.LoginLimit, cfg.LoginWindow),
+		imagesDir:    dir,
+		lastProgress: map[string]time.Time{},
 	}
 }
 
@@ -874,6 +879,9 @@ func (s *Server) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Kind == "blocked" {
 		s.notify("blocked", ev.TaskID, req.Text)
+	}
+	if req.Kind == "progress" {
+		s.notify("progress", ev.TaskID, req.Text)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"event": ev})
 }

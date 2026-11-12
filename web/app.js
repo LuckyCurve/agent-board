@@ -1685,7 +1685,7 @@ async function enablePush() {
   pushEnabled = true;
   updatePushButton();
   syncPushStatus();
-  toast('已开启通知：等你拍板、完成、阻塞时提醒');
+  toast('已开启通知：进展、拍板、完成、阻塞时提醒');
 }
 
 async function disablePush() {

@@ -17,3 +17,4 @@
 | 切换器里混着 `main` 和一堆子 Agent | `ListAgents` 直接拿任务归属去重，`main` 是身份不是 Agent，子 Agent 又和主 Agent 同名同姓分不出来 | 新增 `hosts` 表只收登记过的主 Agent，切换器优先按它列；`main` 在 `ListAgents` 里剔掉 |
 | 卡片标签在网页上显示成「ɸѡ」 | 中文 Windows 控制台（cp936）里敲中文，参数到进程已是 GBK 字节，存进库网页按 UTF-8 解就乱；命令行按 GBK 解看着正常，所以容易被判成前端问题 | `toUTF8` 只在「非法 UTF-8」或「整串 U+0100–U+2E7F 且 GBK 往返一致」时按 GBK 解一次；建卡、转交、标签都过 `cleanText` |
 | 桌面端找不到归档入口 | 归档占看板第 5 列，1440 宽下 4 列一行、第 5 列折到第二行，位置在 2500px 之外 | 归档移出看板：顶部一条归档栏 + 已完成卡上的归档按钮；`ui_test.go` 锁住 COLUMNS 里不再有 archived |
+| 长任务做到一半，用户不知道 Agent 在动 | 推送只在 done/blocked/failed/decision 触发，progress 一条都不推，等于只有结局没有过程 | `pushMessageFor` 收 progress；`allowProgressPush` 按卡限流 5 分钟一条，`TestProgressPushHitsOncePerCard` 锁住「连报三条只推一次、换卡不受影响、完成照旧推」 |

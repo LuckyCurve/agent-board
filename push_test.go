@@ -1,9 +1,16 @@
 package main
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPushSubscriptionRequiresTokenAndToggles(t *testing.T) {
@@ -76,8 +83,9 @@ func TestPushOnlyForAttentionEvents(t *testing.T) {
 		{"done", "导出已经交付", true, "完成"},
 		{"blocked", "权限没开", true, "阻塞"},
 		{"failed", "截图脚本崩了", true, "失败"},
-		{"progress", "跑了一半", false, ""},
+		{"progress", "跑了一半", true, "进展"},
 		{"note", "随手记", false, ""},
+		{"tool", "grep 一下", false, ""},
 	}
 	for _, c := range cases {
 		msg, ok := pushMessageFor(c.kind, "T-1", c.text)
@@ -93,5 +101,78 @@ func TestPushOnlyForAttentionEvents(t *testing.T) {
 		if !strings.Contains(msg.Body, c.text) {
 			t.Fatalf("%s: message body %q missing reason %q", c.kind, msg.Body, c.text)
 		}
+	}
+}
+
+// 进展也要推：用户要的是「它在动」。同一张卡连着报进展只打扰一次。
+func TestProgressPushHitsOncePerCard(t *testing.T) {
+	e := newTestEnv(t)
+
+	var hits atomic.Int32
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hits.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer fake.Close()
+
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authRaw := make([]byte, 16)
+	if _, err := rand.Read(authRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.SavePushSub(fake.URL,
+		base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes()),
+		base64.RawURLEncoding.EncodeToString(authRaw)); err != nil {
+		t.Fatal(err)
+	}
+
+	id := e.createTask(t, "边做边报", "doing")
+	for _, text := range []string{"第一步", "第二步", "第三步"} {
+		code, body, _ := e.req(t, "POST", "/api/tasks/"+id+"/events", map[string]any{
+			"kind": "progress", "text": text})
+		if code != http.StatusCreated {
+			t.Fatalf("progress: %d %v", code, body)
+		}
+	}
+	// 推送是异步的，给它一点时间把能发的都发完。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && hits.Load() == 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("同一张卡连报三条进展，推送了 %d 次，want 1", n)
+	}
+
+	// 换一张卡不受影响。
+	id2 := e.createTask(t, "另一张卡", "doing")
+	code, _, _ := e.req(t, "POST", "/api/tasks/"+id2+"/events", map[string]any{
+		"kind": "progress", "text": "开工"})
+	if code != http.StatusCreated {
+		t.Fatalf("second card progress: %d", code)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && hits.Load() < 2 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("另一张卡的进展没推：共 %d 次，want 2", n)
+	}
+
+	// 完成不受限流：照旧推。
+	code, _, _ = e.req(t, "PATCH", "/api/tasks/"+id, map[string]any{"column": "done"})
+	if code != http.StatusOK {
+		t.Fatalf("done: %d", code)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && hits.Load() < 3 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n := hits.Load(); n != 3 {
+		t.Fatalf("完成该照旧推：共 %d 次，want 3", n)
 	}
 }
