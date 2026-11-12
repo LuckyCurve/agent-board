@@ -31,6 +31,8 @@ type Event struct {
 	Body      string `json:"body,omitempty"`
 	Data      string `json:"data,omitempty"`
 	CreatedAt string `json:"created_at"`
+	// Reply 只在对话题里填：用户自己那条消息的处理状态（未读/已读/完成）。
+	Reply *Reply `json:"reply,omitempty"`
 }
 
 type Task struct {
@@ -609,7 +611,50 @@ func (s *Store) ChatMessagesWithLinked(limit int, agent string) ([]Event, error)
 			out[i].LinkTask = out[i].TaskID
 		}
 	}
+	// 带上每条消息的处理状态：自己发的消息在界面上要显示「未读/已读/完成」。
+	if err := s.attachReplies(out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// attachReplies 一次把一批消息的回执状态填上。
+func (s *Store) attachReplies(evs []Event) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	byID := map[int64]*Reply{}
+	for i := range evs {
+		evs[i].Reply = nil
+	}
+	placeholders := make([]string, 0, len(evs))
+	args := make([]any, 0, len(evs))
+	for _, e := range evs {
+		placeholders = append(placeholders, "?")
+		args = append(args, e.Seq)
+	}
+	rows, err := s.db.Query(`SELECT `+replyCols+` FROM replies WHERE seq IN (`+
+		strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		r, err := scanReplyRow(rows)
+		if err != nil {
+			return err
+		}
+		byID[r.Seq] = &r
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range evs {
+		if r, ok := byID[evs[i].Seq]; ok {
+			evs[i].Reply = r
+		}
+	}
+	return nil
 }
 
 func (s *Store) MoveTask(taskID, column, key string) (Task, error) {

@@ -58,6 +58,9 @@ let pendingOpen = false;   // 「等你决定」列表是否展开
 let flashSeq = 0;          // 刚从待拍板跳进来的消息，渲染后闪一下
 let pendingImages = [];    // 已上传、等随消息发出的图片 id
 let uploadingImages = 0;   // 正在上传的图片数：还有图没传完时不许发
+// 乐观发送：消息先上屏，服务端确认后换成真 seq；失败就标红留着让用户重发。
+// key 用同一个幂等键，重试不会发成两条。
+let outbox = [];           // {key, text, images, taskID, seq, status, error, at}
 let activeTaskID = '';    // 对话里引用的任务：之后发的消息都挂到这张卡
 let plusOpen = false;
 let systemNote = '';       // /状态 等本地提示，不落库
@@ -966,24 +969,80 @@ async function sendFreeMessage(text) {
     await runCommand(text);
     return;
   }
+  // 乐观发送：先上屏、清空输入框，别让用户盯着一个卡住的按钮等。
+  // 失败不丢内容——气泡留着标红，点一下就能重发（幂等键不变，不会发重）。
+  const key = uid();
+  const entry = { key, text, images, taskID: activeTaskID || '', seq: 0, status: 'sending', error: '', at: new Date().toISOString() };
+  outbox.push(entry);
+  systemNote = '';
+  freeDraft = '';
+  chatPinned = true;
+  clearComposeImages();
+  const sent = $('#freeInput');
+  if (sent) { sent.value = ''; autogrow(sent); }
+  renderInbox();
+  scrollChatBottom();
+  await deliverOutbox(entry);
+  const after = $('#freeInput');
+  if (after) { after.value = ''; autogrow(after); after.focus(); }
+}
+
+// 把一条待发消息交给服务端。成功就把气泡换成真消息，失败就标红留着。
+async function deliverOutbox(entry) {
+  entry.status = 'sending';
+  entry.error = '';
+  renderInbox();
   try {
-    await api('/api/message', { method: 'POST', body: { text, images, task_id: activeTaskID || '', key: uid() } });
-    // 先清掉草稿和当前框里的字，刷新后 renderInbox 才不会把旧内容填回去。
-    systemNote = '';
-    freeDraft = '';
-    chatPinned = true;
-    clearComposeImages();
-    const sent = $('#freeInput');
-    if (sent) { sent.value = ''; autogrow(sent); }
-    toast('已发出，主会话已接到');
+    const data = await api('/api/message', {
+      method: 'POST',
+      body: { text: entry.text, images: entry.images, task_id: entry.taskID, key: entry.key },
+    });
+    entry.seq = data.event ? data.event.seq : 0;
+    entry.status = 'sent';
     await Promise.all([refreshChat(), refreshDecisions()]);
-    const after = $('#freeInput');
-    if (after) { after.value = ''; autogrow(after); after.focus(); }
   } catch (e) {
-    const fi = $('#freeInput');
-    if (fi) fi.focus();
-    if (e.message !== 'unauthorized') toast('发送失败：' + e.message, 'bad');
+    if (e.message === 'unauthorized') return;
+    entry.status = 'failed';
+    entry.error = e.message || '发送失败';
+    renderInbox();
+    toast('发送失败：' + entry.error + '（点气泡重发）', 'bad');
   }
+}
+
+// 服务端确认过的消息到了，就把对应的乐观气泡收起来。
+function settleOutbox() {
+  if (!outbox.length) return;
+  const seqs = new Set(state.chat.map(m => m.seq));
+  outbox = outbox.filter(x => x.status !== 'sent' || !seqs.has(x.seq));
+}
+
+function retryOutbox(key) {
+  const entry = outbox.find(x => x.key === key);
+  if (!entry || entry.status === 'sending') return;
+  deliverOutbox(entry);
+}
+
+// 乐观气泡：还没拿到 seq 的消息先按本地状态画出来。
+function outboxHTML(x) {
+  const failed = x.status === 'failed';
+  const cls = failed ? 'failed' : (x.status === 'sending' ? 'sending' : 'sent');
+  const imgs = x.images && x.images.length
+    ? `<div class="img-grid">${x.images.map(id =>
+      `<button type="button" class="img-thumb" data-image="${esc(id)}" aria-label="查看图片">
+        <img src="/images/${esc(id)}" alt="图片" loading="lazy">
+      </button>`).join('')}</div>`
+    : '';
+  return `<li class="msg-item outbox ${cls}" data-outbox="${esc(x.key)}">
+    <div class="msg-who">你</div>
+    ${x.text ? `<div class="msg-text">${richText(x.text, linkOpts)}</div>` : ''}
+    ${imgs}
+    ${failed ? `<div class="msg-alert"><b>没发出去</b><span>${esc(trunc(x.error, 90))}</span></div>` : ''}
+    <div class="msg-foot">
+      <time>${failed ? '点击重发' : '发送中…'}</time>
+      ${failed ? '<span class="msg-state failed" aria-label="发送失败">!</span>'
+        : '<span class="msg-state sending" aria-label="发送中"></span>'}
+    </div>
+  </li>`;
 }
 
 // 输入框指令：看状态、引用/取消任务、建卡派人、挂待拍板。
@@ -1140,6 +1199,28 @@ function quoteTask(id) {
   toast(`已引用 ${id}，在对话里继续说`);
 }
 
+// 自己发的消息下面那个小状态：服务端确认了没有、主会话读到没有、办完没有。
+// 别人的消息不需要这个——他们那边没「已送达」这回事。
+function msgStateHTML(m) {
+  if (m.author && m.author !== 'user') return '';
+  const r = m.reply;
+  if (!r) return '';
+  const tick = (dbl, cls) => `<svg class="ms-tick ${cls}" viewBox="0 0 16 12" aria-hidden="true">${
+    dbl ? '<path d="M1 6.6l2.6 2.6L9 3.6"/><path d="M6.6 9.2L11.9 3.4"/>' : '<path d="M3 6.6l3.4 3.4L13 3.4"/>'}</svg>`;
+  let cls = 'unread';
+  let label = '未读';
+  let glyph = tick(false, '');
+  if (r.status === 'processing') {
+    cls = 'read'; label = r.agent ? r.agent + ' 正在处理' : '已读，处理中'; glyph = tick(true, '');
+  } else if (r.status === 'done') {
+    cls = 'done'; label = '已完成'; glyph = tick(true, '');
+  } else if (r.status === 'failed' || r.status === 'timeout') {
+    cls = 'failed'; label = r.note || (r.status === 'timeout' ? '超时未处理' : '未处理');
+    glyph = '<span class="ms-bang" aria-hidden="true">!</span>';
+  }
+  return `<span class="msg-state ${cls}" title="${esc(label)}" aria-label="${esc(label)}">${glyph}</span>`;
+}
+
 function messageHTML(m) {
   const agent = m.author && m.author !== 'user';
   const who = agent ? m.author : '你';
@@ -1161,7 +1242,7 @@ function messageHTML(m) {
     ${m.body ? `<div class="msg-text">${richText(m.body, linkOpts)}</div>` : ''}
     ${imagesHTML(m.data)}
     ${alert}
-    <div class="msg-foot"><time>${rel(m.created_at)}</time></div>
+    <div class="msg-foot"><time>${rel(m.created_at)}</time>${msgStateHTML(m)}</div>
   </li>`;
 }
 
@@ -1234,8 +1315,10 @@ function renderInbox() {
     : `<div class="empty"><svg viewBox="0 0 24 24"><path d="M4 13.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7.5"/><path d="M4 13.5h4.2l1.4 2.2h4.8l1.4-2.2H20V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
         <div class="e-title">没有待拍板项</div><div class="e-sub">需要你决定的事会出现在这里</div></div>`;
 
+  settleOutbox();
   const msgs = state.chat.slice().reverse();
-  const msgList = (msgs.length ? msgs.map(messageHTML).join('') : '<li class="msg-empty">还没有消息</li>')
+  const msgList = (msgs.length || outbox.length ? msgs.map(messageHTML).join('') + outbox.map(outboxHTML).join('')
+    : '<li class="msg-empty">还没有消息</li>')
     + (systemNote ? `<li class="msg-system">${esc(systemNote)}</li>` : '');
   const scrollHTML = `
       <section class="inbox-section">
@@ -1922,6 +2005,11 @@ function bindUI() {
       if (t.form && t.form.requestSubmit) t.form.requestSubmit();
       else if (t.value.trim()) sendFreeMessage(t.value);
     }
+  });
+  // 发失败的气泡点一下重发。
+  $('#inbox').addEventListener('click', e => {
+    const failed = e.target.closest('.outbox.failed');
+    if (failed) retryOutbox(failed.dataset.outbox);
   });
   $('#inbox').addEventListener('input', e => {
     if (e.target.id === 'freeInput') {

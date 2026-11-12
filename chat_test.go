@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -79,6 +80,62 @@ func TestChatKeepsChronologicalOrderAndLimit(t *testing.T) {
 	// 接口按新到旧返回，前端再反转成 IM 顺序。
 	if msgs[0].(map[string]any)["body"] != "三" || msgs[1].(map[string]any)["body"] != "二" {
 		t.Fatalf("chat order = %v", msgs)
+	}
+}
+
+func TestChatCarriesReplyStateForSentMessages(t *testing.T) {
+	e := newTestEnv(t)
+
+	// 用户发的一句话：等主会话接手，所以是「未读」。
+	code, body, _ := e.req(t, "POST", "/api/message", map[string]any{"text": "在吗"})
+	if code != http.StatusCreated {
+		t.Fatalf("send: %d %v", code, body)
+	}
+	userSeq := int64(body["event"].(map[string]any)["seq"].(float64))
+
+	// Agent 自己发的消息：天然已送达。
+	code, body, _ = e.req(t, "POST", "/api/message", map[string]any{"text": "在", "from": "main"})
+	if code != http.StatusCreated {
+		t.Fatalf("agent send: %d %v", code, body)
+	}
+	agentSeq := int64(body["event"].(map[string]any)["seq"].(float64))
+
+	code, body, _ = e.req(t, "GET", "/api/chat?recent=20", nil)
+	if code != http.StatusOK {
+		t.Fatalf("chat: %d %v", code, body)
+	}
+	got := map[int64]string{}
+	for _, raw := range body["messages"].([]any) {
+		m := raw.(map[string]any)
+		r, _ := m["reply"].(map[string]any)
+		if r == nil {
+			t.Fatalf("message %v has no reply state", m["seq"])
+		}
+		got[int64(m["seq"].(float64))] = r["status"].(string)
+	}
+	if got[userSeq] != "received" {
+		t.Fatalf("user message reply = %q, want received", got[userSeq])
+	}
+	if got[agentSeq] != "done" {
+		t.Fatalf("agent message reply = %q, want done", got[agentSeq])
+	}
+
+	// 主会话接手后，状态跟着变。
+	code, _, _ = e.req(t, "PATCH", fmt.Sprintf("/api/replies/%d", userSeq), map[string]any{
+		"status": "processing", "agent": "main"})
+	if code != http.StatusOK {
+		t.Fatalf("take: %d", code)
+	}
+	_, body, _ = e.req(t, "GET", "/api/chat?recent=20", nil)
+	for _, raw := range body["messages"].([]any) {
+		m := raw.(map[string]any)
+		if int64(m["seq"].(float64)) != userSeq {
+			continue
+		}
+		r := m["reply"].(map[string]any)
+		if r["status"] != "processing" || r["agent"] != "main" {
+			t.Fatalf("reply after take = %v", r)
+		}
 	}
 }
 

@@ -368,6 +368,33 @@ func TestDoneCardsOfferArchiveOnDesktop(t *testing.T) {
 		}
 	}
 }
+func TestMessageBubblesShowDeliveryState(t *testing.T) {
+	e := newTestEnv(t)
+	js := getPageBody(t, e, "/app.js")
+	for _, want := range []string{
+		"function outboxHTML",    // 乐观气泡：先上屏再等回执
+		"function msgStateHTML",  // 每条消息的状态图标
+		"function deliverOutbox", // 发送 + 失败留痕
+		"function retryOutbox",   // 点气泡重发
+		"data-outbox=",
+		"key: entry.key", // 幂等键，重发不会发成两条
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js 缺 %s", want)
+		}
+	}
+	css := getPageBody(t, e, "/app.css")
+	for _, want := range []string{
+		".msg-state.sending", ".msg-state.failed",
+		".msg-state.unread", ".msg-state.read", ".msg-state.done",
+		".msg-item.outbox.failed",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("app.css 缺 %s", want)
+		}
+	}
+}
+
 func TestGrainLayerScrollsWithContent(t *testing.T) {
 	e := newTestEnv(t)
 	css := getPageBody(t, e, "/app.css")
