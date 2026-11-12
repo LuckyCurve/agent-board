@@ -103,6 +103,11 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// 老库里的 GBK 乱码标签顺手扶正一次，之后写入路径自己就干净了。
+	if err := s.repairMojibake(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 

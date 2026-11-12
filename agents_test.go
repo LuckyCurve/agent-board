@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -140,6 +141,51 @@ func TestGarbledConsoleInputIsRepaired(t *testing.T) {
 	}
 	if !got["界面"] {
 		t.Fatalf("正常中文标签被改坏了: %v", body["task"])
+	}
+}
+
+// 老库里已经写坏的标签，启动时扶正一次，正常标签不动。
+func TestRepairMojibakeTagsOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "board.db")
+	st, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.CreateTask("带坏标签的卡", "", "dev", "doing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 绕过写入路径，模拟老版本已经存进去的乱码。
+	if _, err := st.db.Exec(`INSERT INTO task_tags(task_id,tag) VALUES(?,?)`, id.ID, "ɸѡ"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO task_tags(task_id,tag) VALUES(?,?)`, id.ID, "界面"); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	st2, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	tags, err := st2.TaskTags(id.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, x := range tags {
+		got[x] = true
+	}
+	if !got["筛选"] {
+		t.Fatalf("乱码标签该被扶正成「筛选」，实际 %v", tags)
+	}
+	if got["ɸѡ"] {
+		t.Fatalf("老的乱码标签该被删掉，实际 %v", tags)
+	}
+	if !got["界面"] {
+		t.Fatalf("正常标签被动了: %v", tags)
 	}
 }
 

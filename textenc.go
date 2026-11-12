@@ -63,3 +63,46 @@ func hasCJK(s string) bool {
 func cleanText(s string) string {
 	return strings.TrimSpace(toUTF8(s))
 }
+
+// repairMojibake 把老库里已经写坏的标签扶正一次。
+// 只动「看着就是 GBK 乱码」的那几条，正常标签原样留着；冲突的（扶正后撞上已有标签）直接删。
+func (s *Store) repairMojibake() error {
+	rows, err := s.db.Query(`SELECT DISTINCT tag FROM task_tags`)
+	if err != nil {
+		return err
+	}
+	var bad []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return err
+		}
+		if fixed := toUTF8(t); fixed != t {
+			bad = append(bad, t)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, old := range bad {
+		fixed := toUTF8(old)
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO task_tags(task_id,tag)
+			SELECT task_id, ? FROM task_tags WHERE tag=?`, fixed, old); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM task_tags WHERE tag=?`, old); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
