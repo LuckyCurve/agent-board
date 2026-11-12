@@ -11,9 +11,40 @@ test('http 链接渲染成新标签打开的锚点', () => {
   assert.match(out, /看这里 /);
 });
 
-test('#task=T-N 也渲染成锚点', () => {
-  const out = richText('详见 #task=T-12');
-  assert.match(out, /href="#task=T-12"/);
+test('#task=T-N 渲染成可点的小胶囊，带编号和标题', () => {
+  const out = richText('详见 #task=T-12', { taskTitle: id => (id === 'T-12' ? '标签筛选乱码' : '') });
+  assert.match(out, /class="lnk-task" data-task="T-12"/);
+  assert.match(out, /class="lt-id">T-12</);
+  assert.match(out, /class="lt-title">标签筛选乱码</);
+  assert.match(out, /lt-ico/);
+  // 不是裸链接，也不是原样文本。
+  assert.ok(!out.includes('href="#task='), out);
+  assert.ok(!out.includes('#task=T-12<'), out);
+});
+
+test('找不到标题时胶囊只显示编号', () => {
+  const out = richText('#task=T-99', { taskTitle: () => '' });
+  assert.match(out, /class="lnk-task" data-task="T-99"/);
+  assert.ok(!out.includes('lt-title'), out);
+});
+
+test('Markdown 链接 [文字](url) 渲染成文字本身', () => {
+  const out = richText('看 [看板](https://example.com/b) 一眼');
+  assert.match(out, /<a class="lnk" href="https:\/\/example\.com\/b"/);
+  assert.match(out, />看板<\/a>/);
+  assert.ok(!out.includes('[看板]'), out);
+  assert.ok(!out.includes('](https://'), out);
+});
+
+test('Markdown 链接里的文字也要转义', () => {
+  const out = richText('[<b>x</b>](https://example.com)');
+  assert.ok(!out.includes('<b>'), out);
+  assert.match(out, /&lt;b&gt;x&lt;\/b&gt;/);
+});
+
+test('Markdown 链接只认 http(s)，javascript: 不认', () => {
+  const out = richText('[点我](javascript:alert(1))');
+  assert.ok(!out.includes('href="javascript'), out);
 });
 
 test('句末标点不并进链接', () => {

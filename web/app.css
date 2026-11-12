@@ -1620,6 +1620,50 @@ dialog.sheet:not([open]) { display: none; }
 }
 .lnk:hover { text-decoration-color: currentColor; }
 .lnk:focus-visible { outline-offset: 1px; border-radius: 3px; }
+
+/* 任务引用：一行小胶囊，图标 + 编号 + 标题。比裸链接好认，也不打断正文。 */
+.lnk-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 2px 10px 2px 7px;
+  margin: 1px 0;
+  vertical-align: middle;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border-soft));
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  transition: background .12s ease, border-color .12s ease;
+}
+.lnk-task:hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--accent-soft));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-soft));
+}
+.lnk-task:focus-visible { outline-offset: 2px; border-radius: 999px; }
+.lt-ico {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: .75;
+}
+.lt-id { font-family: var(--font-mono); font-weight: 600; flex: none; }
+.lt-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  opacity: .92;
+}
 .msg-foot {
   display: flex;
   align-items: center;

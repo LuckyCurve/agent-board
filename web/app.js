@@ -86,6 +86,15 @@ function uid() {
 const richText = ABLinkify.richText;
 const richPreview = ABLinkify.richPreview;
 
+// #task=T-N 渲染成胶囊时带上卡片标题，找不到就只显示编号。
+const linkOpts = {
+  taskTitle(id) {
+    const t = (state.tasks || []).find(x => x.id === id) ||
+      (state.archived || []).find(x => x.id === id);
+    return t ? t.title : '';
+  },
+};
+
 function trunc(s, n) {
   s = String(s || '').replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n) + '…' : s;
@@ -410,7 +419,7 @@ function lastTextOf(e) {
 
 function cardHTML(t) {
   const last = t.last_event;
-  const lastHTML = richPreview(lastTextOf(last), 96);
+  const lastHTML = richPreview(lastTextOf(last), 96, linkOpts);
   const r = t.reply;
   const alert = taskAlert(t);
   const strip = r && (r.status === 'received' || r.status === 'processing')
@@ -528,7 +537,7 @@ function timelineHTML(events, replies) {
             </button>
           </span>
         </div>
-        <p class="tl-body">${richText(e.body)}</p>
+        <p class="tl-body">${richText(e.body, linkOpts)}</p>
         ${imagesHTML(e.data, 'tl-images')}
         ${quoteHTML(e, bySeq)}
         ${r ? `<div class="tl-status">${statusBadge(r)}</div>` : ''}
@@ -1096,7 +1105,7 @@ function messageHTML(m) {
   return `<li class="msg-item${agent ? ' agent' : ''}${sig && sig.kind === 'failed' ? ' danger' : ''}" data-seq="${m.seq}">
     <div class="msg-who">${esc(who)}</div>
     ${quote}
-    ${m.body ? `<div class="msg-text">${richText(m.body)}</div>` : ''}
+    ${m.body ? `<div class="msg-text">${richText(m.body, linkOpts)}</div>` : ''}
     ${imagesHTML(m.data)}
     ${alert}
     <div class="msg-foot"><time>${rel(m.created_at)}</time></div>
@@ -1760,6 +1769,9 @@ function bindUI() {
 
   // 卡片详情只读：时间线里的「回复」跳回对话并引用这张卡。
   $('#d-timeline').addEventListener('click', e => {
+    if (e.target.closest('.lnk')) return;  // 正文里的外链自己开新标签
+    const taskChip = e.target.closest('.lnk-task');
+    if (taskChip) { openTask(taskChip.dataset.task); return; }
     const btn = e.target.closest('[data-reply]');
     if (!btn || !openTaskId) return;
     quoteTask(openTaskId);
@@ -1787,6 +1799,7 @@ function bindUI() {
 
   // inbox delegation
   $('#inbox').addEventListener('click', e => {
+    if (e.target.closest('.lnk')) return;  // 正文外链交给浏览器
     if (e.target.closest('#plusBtn')) {
       plusOpen = !plusOpen;
       renderPlusMenu();

@@ -158,15 +158,40 @@ func TestBodyLinksAreAnchors(t *testing.T) {
 		t.Fatal("linkify.js 要先于 app.js 加载")
 	}
 	js := getPageBody(t, e, "/app.js")
-	for _, want := range []string{"richText(m.body)", "richText(e.body)", "richPreview(lastTextOf(last)"} {
+	for _, want := range []string{"richText(m.body, linkOpts)", "richText(e.body, linkOpts)", "richPreview(lastTextOf(last), 96, linkOpts)"} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js 里 %s 没走链接渲染", want)
 		}
 	}
 	lib := getPageBody(t, e, "/linkify.js")
-	for _, want := range []string{`target="_blank"`, "noopener noreferrer", "escHTML"} {
+	for _, want := range []string{`target="_blank"`, "noopener noreferrer", "escHTML", "lnk-task"} {
 		if !strings.Contains(lib, want) {
 			t.Fatalf("linkify.js 缺 %s", want)
+		}
+	}
+}
+
+// #task=T-N 渲染成胶囊，并且点得开卡片。
+func TestTaskRefsRenderAsCapsules(t *testing.T) {
+	e := newTestEnv(t)
+	lib := getPageBody(t, e, "/linkify.js")
+	for _, want := range []string{"#task=(T-\\d+)", "lnk-task", "lt-id", "lt-title"} {
+		if !strings.Contains(lib, want) {
+			t.Fatalf("linkify.js 缺 %s", want)
+		}
+	}
+	// Markdown 链接也要认，不能原样当文本。
+	if !strings.Contains(lib, `\[([^\]\n]{1,120})\]`) {
+		t.Fatal("linkify.js 没识别 [文字](url)")
+	}
+	js := getPageBody(t, e, "/app.js")
+	if !strings.Contains(js, "closest('.lnk-task')") {
+		t.Fatal("app.js 没接住胶囊点击")
+	}
+	css := getPageBody(t, e, "/app.css")
+	for _, want := range []string{".lnk-task", ".lt-id", ".lt-title"} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("app.css 缺胶囊样式 %s", want)
 		}
 	}
 }
