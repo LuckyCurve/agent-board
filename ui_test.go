@@ -285,3 +285,23 @@ func TestDetailHasTagsAndTransfer(t *testing.T) {
 		}
 	}
 }
+
+// 噪点层不能跟着视口重画：SVG feTurbulence 每次生成的随机图案都不同，
+// 整层 fixed 时每滚一帧都重画一次，看板页靠近顶部就会一直闪。
+func TestGrainLayerScrollsWithContent(t *testing.T) {
+	e := newTestEnv(t)
+	css := getPageBody(t, e, "/app.css")
+	start := strings.Index(css, "\nbody {")
+	if start < 0 {
+		t.Fatal("app.css 找不到 body 规则")
+	}
+	start++ // 跳过换行，从 body 本身开始
+	rule := css[start : strings.Index(css[start:], "}")+start]
+	if strings.Contains(rule, "background-attachment: fixed;") {
+		t.Fatalf("body 的背景层不能整层 fixed，噪点会每帧重画导致闪烁\n%s", rule)
+	}
+	if !strings.Contains(rule, "background-attachment: fixed, fixed, scroll;") {
+		t.Fatalf("body 的三层背景应为「渐变 fixed、噪点 scroll」\n%s", rule)
+	}
+}
+

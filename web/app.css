@@ -108,7 +108,10 @@ body {
     radial-gradient(900px 520px at 12% -12%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 62%),
     radial-gradient(760px 460px at 108% -6%, rgba(120, 105, 80, .1), transparent 64%),
     var(--grain);
-  background-attachment: fixed;
+  /* 渐变钉在视口，噪点跟着内容滚。整层都 fixed 的话，噪点（SVG feTurbulence）
+     每滚一帧都要按视口重画一次，而它每次生成的随机图案都不同，画面就会闪。
+     噪点是均匀纹理，跟着滚看不出差别，但不再每帧重画。 */
+  background-attachment: fixed, fixed, scroll;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
