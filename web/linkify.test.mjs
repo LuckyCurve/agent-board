@@ -47,6 +47,31 @@ test('Markdown 链接只认 http(s)，javascript: 不认', () => {
   assert.ok(!out.includes('href="javascript'), out);
 });
 
+// 用户不该因为写法不同看到不同的东西：指向某张卡的三种写法都收成同一个胶囊。
+test('指向 #task=T-N 的三种写法都渲染成胶囊', () => {
+  const opts = { taskTitle: id => (id === 'T-6' ? '输入框重合' : '') };
+  const forms = [
+    '见 #task=T-6',
+    '见 https://43-165-128-180.sslip.io/#task=T-6',
+    '见 [T-6](https://43-165-128-180.sslip.io/#task=T-6)',
+    '见 [随便写的字](#task=T-6)',
+  ];
+  for (const f of forms) {
+    const out = richText(f, opts);
+    assert.match(out, /class="lnk-task" data-task="T-6"/, f + ' => ' + out);
+    assert.match(out, /class="lt-title">输入框重合</, f);
+    assert.ok(!out.includes(']('), '不该漏出 Markdown 原文: ' + f);
+    assert.ok(!out.includes('href="https://43-165-128-180'), '看板卡链接不该当普通外链: ' + f);
+  }
+});
+
+test('指向别处的链接照旧是普通锚点，不被收成胶囊', () => {
+  const out = richText('看 [文档](https://example.com/doc) 和 https://example.com/#other');
+  assert.ok(!out.includes('lnk-task'), out);
+  assert.match(out, /href="https:\/\/example\.com\/doc"/);
+  assert.match(out, /href="https:\/\/example\.com\/#other"/);
+});
+
 test('句末标点不并进链接', () => {
   const out = richText('去 https://example.com/x。然后呢');
   assert.match(out, /href="https:\/\/example\.com\/x"/);

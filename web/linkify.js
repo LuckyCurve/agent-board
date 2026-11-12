@@ -2,6 +2,8 @@
 //   1. [文字](https://…)  Markdown 链接，渲染成文字本身
 //   2. https://…          裸链接
 //   3. #task=T-N          任务引用，渲染成可点的小胶囊
+// 指向看板某张卡的链接（…/#task=T-N）不论写成 Markdown 还是整条 URL，都收成胶囊——
+// 用户写什么都该看到同一个东西，不该因为写法不同变成一段原文。
 // 其余一律当纯文本。单独成文件是为了能在 Node 里直接测（app.js 一加载就要 DOM）。
 /* global module */
 (function (root) {
@@ -10,9 +12,10 @@
   // 中文标点不可能出现在 URL 里，直接当边界；不然「见 https://x.com。然后」会把整句吞进链接。
   const URL_BODY = String.raw`https?:\/\/[^\s<>"'\x60，。；：！？、）】》「」【】（）]+`;
   const TOKEN_RE = new RegExp(
-    String.raw`\[([^\]\n]{1,120})\]\((https?:\/\/[^\s()<>"']+)\)` +
+    String.raw`\[([^\]\n]{1,120})\]\((https?:\/\/[^\s()<>"']+|#task=T-\d+)\)` +
     String.raw`|(${URL_BODY})` +
     String.raw`|#task=(T-\d+)`, 'gi');
+  const TASK_IN_URL = /#task=(T-\d+)$/i;
   const TRAIL_PUNCT = /[.,;:!?，。；：！？、）】》]$/;
 
   function escHTML(v) {
@@ -27,6 +30,19 @@
     const s = String(v == null ? '' : v);
     const titleOf = (opts && opts.taskTitle) || null;
     const segs = [];
+    const taskSeg = id => {
+      const key = id.toUpperCase();
+      let title = '';
+      if (titleOf) {
+        try { title = String(titleOf(key) || ''); } catch (_) { title = ''; }
+      }
+      return { text: '#task=' + key, task: key, title };
+    };
+    // 链接地址是不是指向某张卡：…/#task=T-N 或 #task=T-N。
+    const taskFromTarget = target => {
+      const m2 = TASK_IN_URL.exec(target || '');
+      return m2 ? m2[1] : null;
+    };
     let last = 0;
     TOKEN_RE.lastIndex = 0;
     let m;
@@ -36,16 +52,13 @@
 
       if (m[1] !== undefined) {
         // Markdown 链接：显示方括号里的字，指向圆括号里的地址。
-        segs.push({ text: m[1], url: m[2] });
+        // 指向某张卡的，不管方括号里写什么，都收成胶囊——写法不同不该看到不同的东西。
+        const id = taskFromTarget(m[2]);
+        segs.push(id ? taskSeg(id) : { text: m[1], url: m[2] });
         continue;
       }
       if (m[4] !== undefined) {
-        const id = m[4].toUpperCase();
-        let title = '';
-        if (titleOf) {
-          try { title = String(titleOf(id) || ''); } catch (_) { title = ''; }
-        }
-        segs.push({ text: m[0], task: id, title });
+        segs.push(taskSeg(m[4]));
         continue;
       }
 
@@ -64,7 +77,12 @@
         segs.push({ text: m[0] });
         continue;
       }
-      segs.push({ text: hit, url: hit });
+      const id = taskFromTarget(hit);
+      if (id) {
+        segs.push(taskSeg(id));
+      } else {
+        segs.push({ text: hit, url: hit });
+      }
       if (tail) segs.push({ text: tail });
     }
     if (last < s.length) segs.push({ text: s.slice(last) });
